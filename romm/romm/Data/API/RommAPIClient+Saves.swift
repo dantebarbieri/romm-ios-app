@@ -113,11 +113,11 @@ extension RommAPIClient {
     }
 }
 
-struct BulkDeleteAck: Codable {
+struct BulkDeleteAck: Decodable {
     let msg: String
 }
 
-enum BulkDeleteResponse: Codable {
+enum BulkDeleteResponse: Decodable {
     case deletedIDs([Int])
     case acknowledgement(BulkDeleteAck)
 
@@ -140,15 +140,6 @@ enum BulkDeleteResponse: Codable {
         )
     }
 
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .deletedIDs(let ids):
-            try container.encode(ids)
-        case .acknowledgement(let acknowledgement):
-            try container.encode(acknowledgement)
-        }
-    }
 }
 
 // MARK: - Multipart File Helper

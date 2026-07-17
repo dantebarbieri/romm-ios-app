@@ -11,7 +11,7 @@ import Kingfisher
 // MARK: - Cached Image using KFImage (Native Kingfisher SwiftUI Support)
 
 struct CachedKFImage<Content: View, Placeholder: View>: View {
-    private let url: URL?
+    private let request: RommImageRequest?
     private let content: (Image) -> Content
     private let placeholder: () -> Placeholder
 
@@ -20,14 +20,26 @@ struct CachedKFImage<Content: View, Placeholder: View>: View {
         @ViewBuilder content: @escaping (Image) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) {
-        self.url = url
+        self.init(
+            request: resolveImageRequest(url?.absoluteString),
+            content: content,
+            placeholder: placeholder
+        )
+    }
+
+    private init(
+        request: RommImageRequest?,
+        @ViewBuilder content: @escaping (Image) -> Content,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) {
+        self.request = request
         self.content = content
         self.placeholder = placeholder
     }
 
     var body: some View {
         CachedKFImageLoader(
-            url: url,
+            request: request,
             content: content,
             placeholder: placeholder
         )
@@ -37,7 +49,7 @@ struct CachedKFImage<Content: View, Placeholder: View>: View {
 // MARK: - Internal Image Loader using KFImage
 
 private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
-    let url: URL?
+    let request: RommImageRequest?
     let content: (Image) -> Content
     let placeholder: () -> Placeholder
 
@@ -54,39 +66,36 @@ private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
         .onAppear {
             loadImage()
         }
-        .onChange(of: url) { _, _ in
+        .onChange(of: request) { _, _ in
             loadedImage = nil
             loadImage()
         }
     }
 
     private func loadImage() {
-        guard let url = url else { return }
+        guard let request else { return }
 
         var options: KingfisherOptionsInfo = [
-            .diskCacheExpiration(.days(30)),
             .backgroundDecode,
             .scaleFactor(UIScreen.main.scale),
             .processor(DownsamplingImageProcessor(size: CGSize(width: 600, height: 600))),
-            .cacheOriginalImage,
             .transition(.fade(0.2))
         ]
-        if let authHeader = try? RommAPIClient.shared.authorizationHeader(for: url) {
-            options.append(.downloader(RommImageDownloader.shared.downloader))
-            options.append(.requestModifier(AnyModifier { request in
-                var authenticatedRequest = request
-                authenticatedRequest.setValue(authHeader, forHTTPHeaderField: "Authorization")
-                return authenticatedRequest
-            }))
-        }
+        options.append(
+            contentsOf: request.kingfisherOptions(
+                rommDownloader: RommImageDownloader.shared.downloader,
+                rommCache: RommImageCache.shared
+            )
+        )
 
-        KingfisherManager.shared.retrieveImage(with: url, options: options) { result in
+        KingfisherManager.shared.retrieveImage(with: request.url, options: options) { result in
             switch result {
             case .success(let value):
                 loadedImage = value.image
 
-            case .failure(let error):
-                Logger.general.error("❌ Failed to load image from \(url): \(error.localizedDescription)")
+            case .failure:
+                let host = request.url.host ?? "unknown host"
+                Logger.general.error("Failed to load image from \(host)")
             }
         }
     }
@@ -97,7 +106,7 @@ private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
 extension CachedKFImage where Content == Image, Placeholder == Color {
     init(url: URL?) {
         self.init(
-            url: url,
+            request: resolveImageRequest(url?.absoluteString),
             content: { $0 },
             placeholder: { Color.gray.opacity(0.3) }
         )
@@ -110,7 +119,7 @@ extension CachedKFImage where Placeholder == Color {
         @ViewBuilder content: @escaping (Image) -> Content
     ) {
         self.init(
-            url: url,
+            request: resolveImageRequest(url?.absoluteString),
             content: content,
             placeholder: { Color.gray.opacity(0.3) }
         )
@@ -125,14 +134,36 @@ extension CachedKFImage {
         @ViewBuilder content: @escaping (Image) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) {
-        let url = urlString.flatMap { try? RommAPIClient.shared.buildURL(path: $0) }
-        self.init(url: url, content: content, placeholder: placeholder)
+        self.init(
+            request: resolveImageRequest(urlString),
+            content: content,
+            placeholder: placeholder
+        )
     }
 }
 
 extension CachedKFImage where Content == Image, Placeholder == Color {
     init(urlString: String?) {
-        let url = urlString.flatMap { try? RommAPIClient.shared.buildURL(path: $0) }
-        self.init(url: url)
+        self.init(
+            request: resolveImageRequest(urlString),
+            content: { $0 },
+            placeholder: { Color.gray.opacity(0.3) }
+        )
     }
+}
+
+private func resolveImageRequest(_ reference: String?) -> RommImageRequest? {
+    guard let reference else { return nil }
+    do {
+        return try RommImageRequestPolicy().resolve(reference)
+    } catch APIClientError.noConfiguration {
+        Logger.general.error("Cannot resolve RomM image without server configuration")
+    } catch APIClientError.disallowedURL {
+        Logger.general.error("Image URL rejected by security policy")
+    } catch APIClientError.invalidURL {
+        Logger.general.error("Image URL is malformed")
+    } catch {
+        Logger.general.error("Image URL resolution failed")
+    }
+    return nil
 }

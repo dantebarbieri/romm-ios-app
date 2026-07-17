@@ -17,17 +17,17 @@ enum HTTPMethod: String {
 }
 
 protocol PRommAPIClient {
-    func makeRequest<T: Codable>(path: String, method: HTTPMethod, body: Data?, responseType: T.Type) async throws -> T
+    func makeRequest<T: Decodable>(path: String, method: HTTPMethod, body: Data?, responseType: T.Type) async throws -> T
     func makeRequest(path: String, method: HTTPMethod, body: Data?) async throws -> Data
     func downloadFile(path: String, progressHandler: ((Int64, Int64) -> Void)?) async throws -> URL
     func multipartRequest(path: String, method: HTTPMethod, boundary: String, formData: Data, additionalHeaders: [String: String]?) async throws -> Data
-    func get<T: Codable>(_ path: String, responseType: T.Type) async throws -> T
+    func get<T: Decodable>(_ path: String, responseType: T.Type) async throws -> T
     func get(_ path: String) async throws -> Data
     func getBinary(_ path: String) async throws -> Data
-    func post<RequestBody: Codable, ResponseType: Codable>(_ path: String, body: RequestBody, responseType: ResponseType.Type) async throws -> ResponseType
+    func post<RequestBody: Encodable, ResponseType: Decodable>(_ path: String, body: RequestBody, responseType: ResponseType.Type) async throws -> ResponseType
     func post(_ path: String, body: Data?) async throws -> Data
-    func put<RequestBody: Codable, ResponseType: Codable>(_ path: String, body: RequestBody, responseType: ResponseType.Type) async throws -> ResponseType
-    func put<RequestBody: Codable>(_ path: String, body: RequestBody) async throws -> Data
+    func put<RequestBody: Encodable, ResponseType: Decodable>(_ path: String, body: RequestBody, responseType: ResponseType.Type) async throws -> ResponseType
+    func put<RequestBody: Encodable>(_ path: String, body: RequestBody) async throws -> Data
     func put(_ path: String, body: Data?) async throws -> Data
     func delete(_ path: String) async throws -> Data
     func getRomManual(romId: Int) async throws -> Manual?
@@ -141,12 +141,17 @@ class RommAPIClient: PRommAPIClient {
 
     let tokenProvider: PTokenProvider
     let urlSession: URLSession
+    let notificationCenter: NotificationCenter
     let logger = Logger.network
     private let sessionDelegate = PrivateNetworkURLSessionDelegate()
 
-    init(tokenProvider: PTokenProvider = TokenProvider(),
-         urlSession: URLSession? = nil) {
+    init(
+        tokenProvider: PTokenProvider = TokenProvider(),
+        urlSession: URLSession? = nil,
+        notificationCenter: NotificationCenter = .default
+    ) {
         self.tokenProvider = tokenProvider
+        self.notificationCenter = notificationCenter
 
         if let urlSession = urlSession {
             self.urlSession = urlSession
@@ -167,7 +172,7 @@ class RommAPIClient: PRommAPIClient {
 
     // MARK: - makeRequest (generic)
 
-    func makeRequest<T: Codable>(path: String, method: HTTPMethod, body: Data? = nil, responseType: T.Type) async throws -> T {
+    func makeRequest<T: Decodable>(path: String, method: HTTPMethod, body: Data? = nil, responseType: T.Type) async throws -> T {
         let data = try await makeRequest(path: path, method: method, body: body)
         do {
             return try JSONDecoder().decode(responseType, from: data)
@@ -214,15 +219,15 @@ class RommAPIClient: PRommAPIClient {
             logger.logNetworkRequest(method: method.rawValue, url: path, statusCode: httpResponse.statusCode)
             logger.debug("Response data size: \(data.count) bytes")
 
-            switch httpResponse.statusCode {
-            case 200...299:
+            switch APIResponseStatusPolicy.classify(httpResponse.statusCode) {
+            case .success:
                 measurement.end()
                 return data
-            case 401:
+            case .unauthenticated:
                 logger.warning("Authentication failed - invalid credentials")
-                NotificationCenter.default.post(name: .sessionExpired, object: nil)
+                notificationCenter.post(name: .sessionExpired, object: nil)
                 throw APIClientError.authenticationRequired
-            case 403:
+            case .forbidden:
                 let msg = String(data: data, encoding: .utf8) ?? "Forbidden"
 
                 // Check if this is a Cloudflare challenge
@@ -231,25 +236,17 @@ class RommAPIClient: PRommAPIClient {
                     throw APIClientError.cloudflareProtection(msg)
                 }
 
-                // For client token auth, 403 means token was revoked/invalid
-                if tokenProvider.getAuthMethod() == .clientToken {
-                    logger.warning("Client token rejected (403) - session expired")
-                    NotificationCenter.default.post(name: .sessionExpired, object: nil)
-                    throw APIClientError.authenticationRequired
-                }
-
-                // Regular 403 error
                 logger.error("Forbidden (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
-            case 400...499:
+            case .clientError:
                 let msg = String(data: data, encoding: .utf8) ?? "Client error"
                 logger.error("Client error (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
-            case 500...599:
+            case .serverError:
                 let msg = String(data: data, encoding: .utf8) ?? "Server error"
                 logger.error("Server error (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
-            default:
+            case .unexpected:
                 let msg = String(data: data, encoding: .utf8) ?? "Unknown error"
                 logger.error("Unexpected status (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
@@ -334,8 +331,8 @@ class RommAPIClient: PRommAPIClient {
                     }
                 }
 
-                switch httpResponse.statusCode {
-                case 200...299:
+                switch APIResponseStatusPolicy.classify(httpResponse.statusCode) {
+                case .success:
                     guard let tempURL else {
                         self?.logger.error("Download completed without temporary file")
                         continuation.resume(throwing: APIClientError.networkError(URLError(.cannotCreateFile)))
@@ -360,12 +357,12 @@ class RommAPIClient: PRommAPIClient {
                     measurement.end()
                     continuation.resume(returning: persistentURL)
 
-                case 401:
+                case .unauthenticated:
                     self?.logger.warning("Authentication failed during download")
-                    NotificationCenter.default.post(name: .sessionExpired, object: nil)
+                    self?.notificationCenter.post(name: .sessionExpired, object: nil)
                     continuation.resume(throwing: APIClientError.authenticationRequired)
 
-                case 400...599:
+                case .forbidden, .clientError, .serverError:
                     let message: String
                     if let tempURL,
                        let data = try? Data(contentsOf: tempURL),
@@ -378,7 +375,7 @@ class RommAPIClient: PRommAPIClient {
                     self?.logger.error("Download failed (\(httpResponse.statusCode)): \(message)")
                     continuation.resume(throwing: APIClientError.invalidResponse(httpResponse.statusCode, message))
 
-                default:
+                case .unexpected:
                     let message = "Unexpected status code: \(httpResponse.statusCode)"
                     self?.logger.error(message)
                     continuation.resume(throwing: APIClientError.invalidResponse(httpResponse.statusCode, message))
@@ -435,15 +432,15 @@ class RommAPIClient: PRommAPIClient {
 
             logger.logNetworkRequest(method: method.rawValue, url: path, statusCode: httpResponse.statusCode)
 
-            switch httpResponse.statusCode {
-            case 200...299:
+            switch APIResponseStatusPolicy.classify(httpResponse.statusCode) {
+            case .success:
                 measurement.end()
                 return data
-            case 401:
+            case .unauthenticated:
                 logger.warning("Authentication failed for multipart request")
-                NotificationCenter.default.post(name: .sessionExpired, object: nil)
+                notificationCenter.post(name: .sessionExpired, object: nil)
                 throw APIClientError.authenticationRequired
-            case 403:
+            case .forbidden:
                 let msg = String(data: data, encoding: .utf8) ?? "Forbidden"
 
                 if isCloudflareChallenge(response: httpResponse, body: msg) {
@@ -451,23 +448,17 @@ class RommAPIClient: PRommAPIClient {
                     throw APIClientError.cloudflareProtection(msg)
                 }
 
-                if tokenProvider.getAuthMethod() == .clientToken {
-                    logger.warning("Client token rejected (403) on multipart - session expired")
-                    NotificationCenter.default.post(name: .sessionExpired, object: nil)
-                    throw APIClientError.authenticationRequired
-                }
-
                 logger.error("Multipart forbidden (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
-            case 400...499:
+            case .clientError:
                 let msg = String(data: data, encoding: .utf8) ?? "Client error"
                 logger.error("Multipart client error (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
-            case 500...599:
+            case .serverError:
                 let msg = String(data: data, encoding: .utf8) ?? "Server error"
                 logger.error("Multipart server error (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
-            default:
+            case .unexpected:
                 let msg = String(data: data, encoding: .utf8) ?? "Unknown error"
                 logger.error("Multipart unexpected status (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)
@@ -485,7 +476,7 @@ class RommAPIClient: PRommAPIClient {
 
     // MARK: - Convenience Methods
 
-    func get<T: Codable>(_ path: String, responseType: T.Type) async throws -> T {
+    func get<T: Decodable>(_ path: String, responseType: T.Type) async throws -> T {
         try await makeRequest(path: path, method: .get, responseType: responseType)
     }
 
@@ -504,18 +495,19 @@ class RommAPIClient: PRommAPIClient {
         request.timeoutInterval = 30.0
         let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIClientError.networkError(URLError(.badServerResponse)) }
-        switch http.statusCode {
-        case 200...299: return data
-        case 401:
-            NotificationCenter.default.post(name: .sessionExpired, object: nil)
+        switch APIResponseStatusPolicy.classify(http.statusCode) {
+        case .success:
+            return data
+        case .unauthenticated:
+            notificationCenter.post(name: .sessionExpired, object: nil)
             throw APIClientError.authenticationRequired
-        default:
+        case .forbidden, .clientError, .serverError, .unexpected:
             let msg = String(data: data.prefix(500), encoding: .utf8) ?? "Error"
             throw APIClientError.invalidResponse(http.statusCode, msg)
         }
     }
 
-    func post<RequestBody: Codable, ResponseType: Codable>(
+    func post<RequestBody: Encodable, ResponseType: Decodable>(
         _ path: String,
         body: RequestBody,
         responseType: ResponseType.Type
@@ -528,7 +520,7 @@ class RommAPIClient: PRommAPIClient {
         try await makeRequest(path: path, method: .post, body: body)
     }
 
-    func put<RequestBody: Codable, ResponseType: Codable>(
+    func put<RequestBody: Encodable, ResponseType: Decodable>(
         _ path: String,
         body: RequestBody,
         responseType: ResponseType.Type
@@ -537,7 +529,7 @@ class RommAPIClient: PRommAPIClient {
         return try await makeRequest(path: path, method: .put, body: jsonData, responseType: responseType)
     }
 
-    func put<RequestBody: Codable>(_ path: String, body: RequestBody) async throws -> Data {
+    func put<RequestBody: Encodable>(_ path: String, body: RequestBody) async throws -> Data {
         let jsonData = try JSONEncoder().encode(body)
         return try await makeRequest(path: path, method: .put, body: jsonData)
     }

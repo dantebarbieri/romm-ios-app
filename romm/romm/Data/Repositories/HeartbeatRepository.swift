@@ -5,6 +5,60 @@
 
 import Foundation
 
+struct RommVersionCompatibilityPolicy {
+    static let minimumDisplayVersion = "4.1.0"
+    static let maximumDisplayVersion = "5.0.x"
+
+    private static let minimumVersion = SemanticVersion(major: 4, minor: 1, patch: 0)
+    private static let maximumMajor = 5
+    private static let maximumMinor = 0
+
+    static func isCompatible(_ version: String) -> Bool {
+        guard let version = SemanticVersion(version) else { return false }
+        return version >= minimumVersion
+            && (
+                version.major < maximumMajor
+                    || (version.major == maximumMajor && version.minor <= maximumMinor)
+            )
+    }
+
+    static func isBelowMinimum(_ version: String) -> Bool {
+        if version == "development" { return false }
+        guard let version = SemanticVersion(version) else { return true }
+        return version < minimumVersion
+    }
+
+    private struct SemanticVersion: Comparable {
+        let major: Int
+        let minor: Int
+        let patch: Int
+
+        init(major: Int, minor: Int, patch: Int) {
+            self.major = major
+            self.minor = minor
+            self.patch = patch
+        }
+
+        init?(_ value: String) {
+            let base = value.prefix { $0 != "-" && $0 != "+" }
+            let parts = base.split(separator: ".", omittingEmptySubsequences: false)
+            let numbers = parts.compactMap { Int($0) }
+            guard (1...3).contains(parts.count),
+                  numbers.count == parts.count,
+                  numbers.allSatisfy({ $0 >= 0 }) else {
+                return nil
+            }
+            major = numbers[0]
+            minor = numbers.count > 1 ? numbers[1] : 0
+            patch = numbers.count > 2 ? numbers[2] : 0
+        }
+
+        static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+            (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
+        }
+    }
+}
+
 class HeartbeatRepository: PHeartbeatRepository {
     private let logger = Logger.data
     private let apiClient: RommAPIClient
@@ -12,8 +66,8 @@ class HeartbeatRepository: PHeartbeatRepository {
 
     // MARK: - Constants
 
-    let minSupportedServerVersion = "4.1.0"
-    let maxSupportedServerVersion = "5.0.0"
+    let minSupportedServerVersion = RommVersionCompatibilityPolicy.minimumDisplayVersion
+    let maxSupportedServerVersion = RommVersionCompatibilityPolicy.maximumDisplayVersion
     let versionCheckThrottleSeconds: TimeInterval = 30
 
     // MARK: - UserDefaults Keys
@@ -88,7 +142,7 @@ class HeartbeatRepository: PHeartbeatRepository {
         }
 
         // Check if version is below minimum
-        if compareVersions(serverVersion, minSupportedServerVersion) < 0 {
+        if RommVersionCompatibilityPolicy.isBelowMinimum(serverVersion) {
             logger.warning(
                 "Server version \(serverVersion) is below minimum \(minSupportedServerVersion)")
             throw HeartbeatError.serverVersionTooLow(
@@ -98,7 +152,7 @@ class HeartbeatRepository: PHeartbeatRepository {
         }
 
         // Check if version is above maximum
-        if compareVersions(serverVersion, maxSupportedServerVersion) > 0 {
+        if !RommVersionCompatibilityPolicy.isCompatible(serverVersion) {
             logger.warning(
                 "Server version \(serverVersion) is above maximum \(maxSupportedServerVersion)")
             throw HeartbeatError.serverVersionTooHigh(
@@ -129,7 +183,7 @@ class HeartbeatRepository: PHeartbeatRepository {
             logger.info("Incompatible version login allowed - skipping maximum version check")
 
             // Only check minimum version (critical incompatibility)
-            if compareVersions(serverVersion, minSupportedServerVersion) < 0 {
+            if RommVersionCompatibilityPolicy.isBelowMinimum(serverVersion) {
                 logger.warning(
                     "Server version \(serverVersion) is below minimum \(minSupportedServerVersion)")
                 throw HeartbeatError.serverVersionTooLow(
@@ -139,7 +193,7 @@ class HeartbeatRepository: PHeartbeatRepository {
             }
         } else {
             // Standard checks for both minimum and maximum
-            if compareVersions(serverVersion, minSupportedServerVersion) < 0 {
+            if RommVersionCompatibilityPolicy.isBelowMinimum(serverVersion) {
                 logger.warning(
                     "Server version \(serverVersion) is below minimum \(minSupportedServerVersion)")
                 throw HeartbeatError.serverVersionTooLow(
@@ -148,7 +202,7 @@ class HeartbeatRepository: PHeartbeatRepository {
                 )
             }
 
-            if compareVersions(serverVersion, maxSupportedServerVersion) > 0 {
+            if !RommVersionCompatibilityPolicy.isCompatible(serverVersion) {
                 logger.warning(
                     "Server version \(serverVersion) is above maximum \(maxSupportedServerVersion)")
                 throw HeartbeatError.serverVersionTooHigh(
@@ -200,9 +254,7 @@ class HeartbeatRepository: PHeartbeatRepository {
     // MARK: - Version Comparison
 
     func isVersionCompatible(_ version: String) -> Bool {
-        let aboveMin = compareVersions(version, minSupportedServerVersion) >= 0
-        let belowMax = compareVersions(version, maxSupportedServerVersion) <= 0
-        return aboveMin && belowMax
+        RommVersionCompatibilityPolicy.isCompatible(version)
     }
 
     private func compareVersions(_ version1: String, _ version2: String) -> Int {

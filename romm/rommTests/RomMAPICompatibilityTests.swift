@@ -1,4 +1,5 @@
 import Foundation
+import Kingfisher
 import Testing
 @testable import romm
 
@@ -178,6 +179,163 @@ struct RomMAPICompatibilityTests {
         #expect(try client.authorizationHeader(for: url) == nil)
     }
 
+    @Test func relativeImageUsesAuthenticatedRomMPolicy() throws {
+        let request = try authenticatedImagePolicy().resolve(
+            "/api/screenshots/4/content"
+        )
+
+        #expect(request.accessPolicy == .romm)
+        #expect(request.usesRommAuthentication)
+        #expect(request.usesPrivateNetworkTrust)
+        #expect(!request.usesSharedPersistentCache)
+    }
+
+    @Test func sameOriginAbsoluteImageUsesAuthenticatedRomMPolicy() throws {
+        let request = try authenticatedImagePolicy().resolve(
+            "https://romm.example/api/screenshots/4/content"
+        )
+
+        #expect(request.accessPolicy == .romm)
+        #expect(request.usesRommAuthentication)
+        #expect(request.usesPrivateNetworkTrust)
+    }
+
+    @Test func externalProviderArtworkUsesPublicPolicy() throws {
+        let policy = authenticatedImagePolicy()
+
+        for urlString in [
+            "https://images.igdb.com/igdb/image/upload/t_cover_big/example.jpg",
+            "http://cdn.steamgriddb.com/grid/example.png"
+        ] {
+            let request = try policy.resolve(urlString)
+            let options = KingfisherParsedOptionsInfo(
+                request.kingfisherOptions(
+                    rommDownloader: ImageDownloader(name: UUID().uuidString),
+                    rommCache: ImageCache(name: UUID().uuidString)
+                )
+            )
+
+            #expect(request.accessPolicy == .publicExternal)
+            #expect(request.authorizationHeader == nil)
+            #expect(!request.usesPrivateNetworkTrust)
+            #expect(request.usesSharedPersistentCache)
+            #expect(options.downloader == nil)
+            #expect(!options.cacheMemoryOnly)
+            #expect(!options.forceRefresh)
+            #expect(options.cacheOriginalImage)
+            #expect(options.requestModifier == nil)
+        }
+    }
+
+    @Test func crossOriginPrivateImageUsesStandardTLSWithoutAuth() throws {
+        let request = try authenticatedImagePolicy().resolve(
+            "https://192.168.1.21/provider/cover.jpg"
+        )
+        let options = KingfisherParsedOptionsInfo(
+            request.kingfisherOptions(
+                rommDownloader: ImageDownloader(name: UUID().uuidString),
+                rommCache: ImageCache(name: UUID().uuidString)
+            )
+        )
+
+        #expect(request.accessPolicy == .publicExternal)
+        #expect(request.authorizationHeader == nil)
+        #expect(!request.usesPrivateNetworkTrust)
+        #expect(options.downloader == nil)
+        #expect(options.requestModifier == nil)
+    }
+
+    @Test func unsafeImageURLsAreRejected() {
+        let policy = authenticatedImagePolicy()
+
+        for reference in [
+            "file:///private/cover.jpg",
+            "data:image/png;base64,AAAA",
+            "ftp://artwork.example/cover.jpg",
+            "//artwork.example/cover.jpg",
+            "https://user" + "@artwork.example/cover.jpg",
+            "https://"
+        ] {
+            #expect(throws: APIClientError.self) {
+                try policy.resolve(reference)
+            }
+        }
+    }
+
+    @Test func romMImageOptionsCannotReuseSharedAccountCache() throws {
+        let request = try authenticatedImagePolicy().resolve(
+            "/api/screenshots/4/content"
+        )
+        let downloader = ImageDownloader(name: UUID().uuidString)
+        let cache = ImageCache(name: UUID().uuidString)
+        let options = KingfisherParsedOptionsInfo(
+            request.kingfisherOptions(
+                rommDownloader: downloader,
+                rommCache: cache
+            )
+        )
+
+        #expect(options.downloader === downloader)
+        #expect(options.targetCache === cache)
+        #expect(options.targetCache !== ImageCache.default)
+        #expect(options.cacheMemoryOnly)
+        #expect(options.forceRefresh)
+        #expect(!options.cacheOriginalImage)
+        #expect(options.requestModifier != nil)
+    }
+
+    @Test func unauthorizedResponseExpiresSession() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let client = statusResponseClient(notificationCenter: notificationCenter)
+        do {
+            _ = try await client.get("status/401")
+            Issue.record("Expected authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected authentication failure, got \(error)")
+        }
+
+        #expect(counter.value == 1)
+        #expect(APIResponseStatusPolicy.classify(401).shouldExpireSession)
+    }
+
+    @Test func forbiddenResponseRemainsPermissionFailure() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let client = statusResponseClient(notificationCenter: notificationCenter)
+        do {
+            _ = try await client.get("status/403")
+            Issue.record("Expected permission failure")
+        } catch APIClientError.invalidResponse(let statusCode, _) {
+            #expect(statusCode == 403)
+        } catch {
+            Issue.record("Expected permission failure, got \(error)")
+        }
+
+        #expect(counter.value == 0)
+        #expect(APIResponseStatusPolicy.classify(403) == .forbidden)
+        #expect(!APIResponseStatusPolicy.classify(403).shouldExpireSession)
+    }
+
     @Test func romMFourSaveDeleteResponseDecodes() throws {
         let response = try decodeBulkDeleteResponse("[4, 7]")
 
@@ -310,6 +468,32 @@ struct RomMAPICompatibilityTests {
         try JSONDecoder().decode(BulkDeleteResponse.self, from: Data(json.utf8))
     }
 
+    private func authenticatedImagePolicy() -> RommImageRequestPolicy {
+        let tokenProvider = MockTokenProvider(
+            serverURL: "https://romm.example",
+            username: "user",
+            password: "pass"
+        )
+        return RommImageRequestPolicy(
+            apiClient: RommAPIClient(tokenProvider: tokenProvider)
+        )
+    }
+
+    private func statusResponseClient(
+        notificationCenter: NotificationCenter
+    ) -> RommAPIClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StatusResponseURLProtocol.self]
+        let tokenProvider = MockTokenProvider(serverURL: "https://romm.example")
+        tokenProvider.mockAuthMethod = .clientToken
+        tokenProvider.mockClientToken = "rmm_test"
+        return RommAPIClient(
+            tokenProvider: tokenProvider,
+            urlSession: URLSession(configuration: configuration),
+            notificationCenter: notificationCenter
+        )
+    }
+
     private func protectionSpace(
         host: String,
         port: Int,
@@ -353,6 +537,53 @@ struct RomMAPICompatibilityTests {
             Issue.record("Expected a missing configuration error, got \(error)")
         }
     }
+}
+
+private final class NotificationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+}
+
+private final class StatusResponseURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url,
+              let statusCode = Int(url.lastPathComponent),
+              let response = HTTPURLResponse(
+                  url: url,
+                  statusCode: statusCode,
+                  httpVersion: "HTTP/1.1",
+                  headerFields: ["Content-Type": "application/json"]
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        let data = Data(#"{"detail":"Permission denied"}"#.utf8)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class SaveDownloadRepositoryStub: PSavesRepository {

@@ -12,8 +12,7 @@ struct HeartbeatRepositoryTests {
 
     @Test func developmentVersionIsNotCompatible() {
         let repo = HeartbeatRepository()
-        // "development" > maxSupportedServerVersion → belowMax-Check schlägt fehl
-        #expect(repo.isVersionCompatible("development") == false)
+        #expect(!repo.isVersionCompatible("development"))
     }
 
     // MARK: - isVersionCompatible: normale Releases
@@ -23,9 +22,12 @@ struct HeartbeatRepositoryTests {
         #expect(repo.isVersionCompatible("4.1.0") == true)
     }
 
-    @Test func maxSupportedVersionIsCompatible() {
+    @Test func auditedMajorMinorLineIsCompatible() {
         let repo = HeartbeatRepository()
-        #expect(repo.isVersionCompatible("5.0.0") == true)
+        for version in ["4.1.0", "4.9.2", "5.0.0", "5.0.1", "5.0.99"] {
+            #expect(repo.isVersionCompatible(version))
+        }
+        #expect(repo.maxSupportedServerVersion == "5.0.x")
     }
 
     @Test func latestRomMFourVersionIsCompatible() {
@@ -33,14 +35,11 @@ struct HeartbeatRepositoryTests {
         #expect(repo.isVersionCompatible("4.9.2") == true)
     }
 
-    @Test func versionBelowMinIsNotCompatible() {
+    @Test func versionsOutsideAuditedRangeAreNotCompatible() {
         let repo = HeartbeatRepository()
-        #expect(repo.isVersionCompatible("4.0.9") == false)
-    }
-
-    @Test func versionAboveMaxIsNotCompatible() {
-        let repo = HeartbeatRepository()
-        #expect(repo.isVersionCompatible("5.0.1") == false)
+        for version in ["4.0.99", "5.1.0", "6.0.0", "unknown"] {
+            #expect(!repo.isVersionCompatible(version))
+        }
     }
 
     @Test func prereleaseVersionStripsCorrectly() {

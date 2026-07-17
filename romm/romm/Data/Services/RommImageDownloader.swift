@@ -1,6 +1,10 @@
 import Foundation
 import Kingfisher
 
+enum RommImageCache {
+    static let shared = ImageCache(name: "romm-private-assets")
+}
+
 final class RommImageDownloader {
     static let shared = RommImageDownloader()
 
