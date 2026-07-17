@@ -46,6 +46,7 @@ class AuthRepository: PAuthRepository {
             self.isAuthenticated = false
             self.currentUser = nil            
         }
+        RommImageSessionManager.shared.reset()
         
         logger.info("Logout complete")
     }

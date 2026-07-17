@@ -83,8 +83,7 @@ private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
         ]
         options.append(
             contentsOf: request.kingfisherOptions(
-                rommDownloader: RommImageDownloader.shared.downloader,
-                rommCache: RommImageCache.shared
+                sessionManager: RommImageSessionManager.shared
             )
         )
 

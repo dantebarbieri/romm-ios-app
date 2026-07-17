@@ -152,8 +152,8 @@ extension RommAPIClient {
 
             logger.debug("PDF Response status: \(httpResponse.statusCode), size: \(data.count) bytes")
 
-            switch httpResponse.statusCode {
-            case 200...299:
+            switch APIResponseStatusPolicy.classify(httpResponse.statusCode) {
+            case .success:
                 if let contentType = httpResponse.allHeaderFields["Content-Type"] as? String,
                    contentType.contains("text/html") {
                     let htmlContent = String(data: data, encoding: .utf8) ?? "HTML content"
@@ -161,9 +161,10 @@ extension RommAPIClient {
                     throw APIClientError.invalidResponse(200, "Received HTML instead of PDF - authentication may have failed")
                 }
                 return data
-            case 401, 403:
+            case .unauthenticated:
+                notifySessionExpired()
                 throw APIClientError.authenticationRequired
-            default:
+            case .forbidden, .clientError, .serverError, .unexpected:
                 let msg = String(data: data, encoding: .utf8) ?? "PDF download failed"
                 logger.error("PDF download failed (\(httpResponse.statusCode)): \(msg)")
                 throw APIClientError.invalidResponse(httpResponse.statusCode, msg)

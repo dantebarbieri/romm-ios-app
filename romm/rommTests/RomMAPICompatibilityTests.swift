@@ -208,10 +208,10 @@ struct RomMAPICompatibilityTests {
             "http://cdn.steamgriddb.com/grid/example.png"
         ] {
             let request = try policy.resolve(urlString)
+            let sessionManager = imageSessionManager()
             let options = KingfisherParsedOptionsInfo(
                 request.kingfisherOptions(
-                    rommDownloader: ImageDownloader(name: UUID().uuidString),
-                    rommCache: ImageCache(name: UUID().uuidString)
+                    sessionManager: sessionManager
                 )
             )
 
@@ -224,6 +224,7 @@ struct RomMAPICompatibilityTests {
             #expect(!options.forceRefresh)
             #expect(options.cacheOriginalImage)
             #expect(options.requestModifier == nil)
+            #expect(sessionManager.currentSession == nil)
         }
     }
 
@@ -231,10 +232,10 @@ struct RomMAPICompatibilityTests {
         let request = try authenticatedImagePolicy().resolve(
             "https://192.168.1.21/provider/cover.jpg"
         )
+        let sessionManager = imageSessionManager()
         let options = KingfisherParsedOptionsInfo(
             request.kingfisherOptions(
-                rommDownloader: ImageDownloader(name: UUID().uuidString),
-                rommCache: ImageCache(name: UUID().uuidString)
+                sessionManager: sessionManager
             )
         )
 
@@ -243,6 +244,7 @@ struct RomMAPICompatibilityTests {
         #expect(!request.usesPrivateNetworkTrust)
         #expect(options.downloader == nil)
         #expect(options.requestModifier == nil)
+        #expect(sessionManager.currentSession == nil)
     }
 
     @Test func unsafeImageURLsAreRejected() {
@@ -266,22 +268,234 @@ struct RomMAPICompatibilityTests {
         let request = try authenticatedImagePolicy().resolve(
             "/api/screenshots/4/content"
         )
-        let downloader = ImageDownloader(name: UUID().uuidString)
-        let cache = ImageCache(name: UUID().uuidString)
+        let sessionManager = imageSessionManager()
         let options = KingfisherParsedOptionsInfo(
             request.kingfisherOptions(
-                rommDownloader: downloader,
-                rommCache: cache
+                sessionManager: sessionManager
             )
         )
+        let reusedOptions = KingfisherParsedOptionsInfo(
+            request.kingfisherOptions(
+                sessionManager: sessionManager
+            )
+        )
+        let session = try #require(sessionManager.currentSession)
 
-        #expect(options.downloader === downloader)
-        #expect(options.targetCache === cache)
+        #expect(options.downloader === session.downloader)
+        #expect(options.targetCache === session.cache)
+        #expect(reusedOptions.downloader === session.downloader)
+        #expect(reusedOptions.targetCache === session.cache)
         #expect(options.targetCache !== ImageCache.default)
         #expect(options.cacheMemoryOnly)
-        #expect(options.forceRefresh)
+        #expect(!options.forceRefresh)
         #expect(!options.cacheOriginalImage)
         #expect(options.requestModifier != nil)
+    }
+
+    @Test func privateImageSessionsArePartitionedByAuthenticationScope() {
+        let manager = imageSessionManager()
+        let firstScope = imageAuthScope("account-a")
+        let secondScope = imageAuthScope("account-b")
+
+        let firstSession = manager.session(for: firstScope)
+        let reusedSession = manager.session(for: firstScope)
+        let secondSession = manager.session(for: secondScope)
+
+        #expect(firstSession === reusedSession)
+        #expect(firstSession.downloader === reusedSession.downloader)
+        #expect(firstSession.cache === reusedSession.cache)
+        #expect(firstSession.downloader !== secondSession.downloader)
+        #expect(firstSession.cache !== secondSession.cache)
+        #expect(firstSession.isInvalidated)
+        #expect(firstSession.downloader.isScopeInvalidated)
+        #expect(!secondSession.isInvalidated)
+    }
+
+    @Test func stalePrivateImageUnauthorizedResponseCannotExpireNewScope() {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let manager = imageSessionManager(notificationCenter: notificationCenter)
+        let firstSession = manager.session(for: imageAuthScope("account-a"))
+        let secondSession = manager.session(for: imageAuthScope("account-b"))
+
+        _ = firstSession.responseDelegate.isValidStatusCode(
+            401,
+            for: firstSession.downloader
+        )
+
+        #expect(counter.value == 0)
+        #expect(manager.currentSession === secondSession)
+        #expect(!secondSession.isInvalidated)
+    }
+
+    @Test func publicArtworkDoesNotChangePrivateImageSession() throws {
+        let manager = imageSessionManager()
+        let privateRequest = try authenticatedImagePolicy().resolve(
+            "/api/screenshots/4/content"
+        )
+        _ = privateRequest.kingfisherOptions(sessionManager: manager)
+        let privateSession = try #require(manager.currentSession)
+
+        let publicRequest = try authenticatedImagePolicy().resolve(
+            "https://images.igdb.com/igdb/image/upload/example.jpg"
+        )
+        let publicOptions = KingfisherParsedOptionsInfo(
+            publicRequest.kingfisherOptions(sessionManager: manager)
+        )
+
+        #expect(manager.currentSession === privateSession)
+        #expect(!privateSession.isInvalidated)
+        #expect(publicOptions.downloader == nil)
+        #expect(!publicOptions.cacheMemoryOnly)
+    }
+
+    @Test @MainActor func globalKingfisherDefaultsDoNotPersistOriginalImages() {
+        _ = KingfisherCacheManager.shared
+        let options = KingfisherParsedOptionsInfo(
+            KingfisherManager.shared.defaultOptions
+        )
+
+        #expect(!options.cacheOriginalImage)
+    }
+
+    @Test func authenticationScopeChangeInvalidatesPrivateImageSession() {
+        let notificationCenter = NotificationCenter()
+        let manager = imageSessionManager(notificationCenter: notificationCenter)
+        let session = manager.session(
+            for: imageAuthScope("account-a")
+        )
+
+        manager.authenticationScopeDidChange()
+
+        #expect(manager.currentSession == nil)
+        #expect(session.isInvalidated)
+        #expect(session.downloader.isScopeInvalidated)
+
+        let reopenedSession = manager.session(for: imageAuthScope("account-a"))
+        #expect(!reopenedSession.isInvalidated)
+    }
+
+    @Test func authenticationInvalidationRejectsRetainedPrivateRequests() {
+        let notificationCenter = NotificationCenter()
+        let manager = imageSessionManager(notificationCenter: notificationCenter)
+        let scope = imageAuthScope("account-a")
+        let session = manager.session(for: scope)
+
+        manager.reset()
+        let rejectedSession = manager.session(for: scope)
+
+        #expect(session.isInvalidated)
+        #expect(rejectedSession.downloader.isScopeInvalidated)
+        #expect(manager.currentSession == nil)
+    }
+
+    @Test func retainedRequestCannotUseChangedCredentials() throws {
+        let notificationCenter = NotificationCenter()
+        let tokenProvider = MockTokenProvider(
+            serverURL: "https://romm.example",
+            username: "user",
+            password: "first-password"
+        )
+        let client = RommAPIClient(tokenProvider: tokenProvider)
+        let policy = RommImageRequestPolicy(apiClient: client)
+        let manager = RommImageSessionManager(
+            apiClient: client,
+            notificationCenter: notificationCenter
+        )
+        let retainedRequest = try policy.resolve("/api/screenshots/4/content")
+        _ = retainedRequest.kingfisherOptions(sessionManager: manager)
+
+        tokenProvider.mockPassword = "second-password"
+        manager.authenticationScopeDidChange()
+        let staleOptions = KingfisherParsedOptionsInfo(
+            retainedRequest.kingfisherOptions(sessionManager: manager)
+        )
+
+        let staleDownloader = try #require(
+            staleOptions.downloader as? RommScopedImageDownloader
+        )
+        #expect(staleDownloader.isScopeInvalidated)
+        #expect(manager.currentSession == nil)
+
+        let currentRequest = try policy.resolve("/api/screenshots/4/content")
+        _ = currentRequest.kingfisherOptions(sessionManager: manager)
+        let currentSession = try #require(manager.currentSession)
+        #expect(!currentSession.isInvalidated)
+    }
+
+    @Test func privateImageUnauthorizedResponseExpiresAndInvalidatesOnce() {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let manager = imageSessionManager(notificationCenter: notificationCenter)
+        let session = manager.session(
+            for: imageAuthScope("account-a")
+        )
+
+        let firstIsValid = session.responseDelegate.isValidStatusCode(
+            401,
+            for: session.downloader
+        )
+        let secondIsValid = session.responseDelegate.isValidStatusCode(
+            401,
+            for: session.downloader
+        )
+
+        #expect(!firstIsValid)
+        #expect(!secondIsValid)
+        #expect(counter.value == 1)
+        #expect(manager.currentSession == nil)
+        #expect(session.isInvalidated)
+        #expect(session.downloader.isScopeInvalidated)
+
+        let retriedSession = manager.session(for: imageAuthScope("account-a"))
+        #expect(retriedSession.downloader.isScopeInvalidated)
+    }
+
+    @Test func privateImageForbiddenResponseDoesNotExpireSession() {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let manager = imageSessionManager(notificationCenter: notificationCenter)
+        let session = manager.session(
+            for: imageAuthScope("account-a")
+        )
+
+        let isValid = session.responseDelegate.isValidStatusCode(
+            403,
+            for: session.downloader
+        )
+
+        #expect(!isValid)
+        #expect(APIResponseStatusPolicy.classify(403) == .forbidden)
+        #expect(counter.value == 0)
+        #expect(manager.currentSession === session)
+        #expect(!session.isInvalidated)
     }
 
     @Test func unauthorizedResponseExpiresSession() async throws {
@@ -334,6 +548,59 @@ struct RomMAPICompatibilityTests {
         #expect(counter.value == 0)
         #expect(APIResponseStatusPolicy.classify(403) == .forbidden)
         #expect(!APIResponseStatusPolicy.classify(403).shouldExpireSession)
+    }
+
+    @Test func manualDownloadUnauthorizedResponseExpiresSession() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let client = statusResponseClient(notificationCenter: notificationCenter)
+        do {
+            _ = try await client.getManualPDFData(
+                manualURL: "https://romm.example/status/401"
+            )
+            Issue.record("Expected manual authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected manual authentication failure, got \(error)")
+        }
+
+        #expect(counter.value == 1)
+    }
+
+    @Test func manualDownloadForbiddenResponseRemainsPermissionFailure() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let client = statusResponseClient(notificationCenter: notificationCenter)
+        do {
+            _ = try await client.getManualPDFData(
+                manualURL: "https://romm.example/status/403"
+            )
+            Issue.record("Expected manual permission failure")
+        } catch APIClientError.invalidResponse(let statusCode, _) {
+            #expect(statusCode == 403)
+        } catch {
+            Issue.record("Expected manual permission failure, got \(error)")
+        }
+
+        #expect(counter.value == 0)
     }
 
     @Test func romMFourSaveDeleteResponseDecodes() throws {
@@ -390,13 +657,16 @@ struct RomMAPICompatibilityTests {
     }
 
     @Test func romMImageDownloaderUsesPrivateNetworkTrustResponder() {
-        let imageDownloader = RommImageDownloader(
+        let manager = RommImageSessionManager(
             apiClient: RommAPIClient(
                 tokenProvider: MockTokenProvider(serverURL: "https://192.168.1.20")
             )
         )
+        let session = manager.session(
+            for: imageAuthScope("private-server")
+        )
 
-        #expect(imageDownloader.isPrivateNetworkTrustConfigured)
+        #expect(session.isPrivateNetworkTrustConfigured)
     }
 
     @Test func imageTrustRequiresPrivateSameOriginHost() {
@@ -477,6 +747,32 @@ struct RomMAPICompatibilityTests {
         return RommImageRequestPolicy(
             apiClient: RommAPIClient(tokenProvider: tokenProvider)
         )
+    }
+
+    private func imageSessionManager(
+        notificationCenter: NotificationCenter = NotificationCenter()
+    ) -> RommImageSessionManager {
+        RommImageSessionManager(
+            apiClient: RommAPIClient(
+                tokenProvider: MockTokenProvider(
+                    serverURL: "https://romm.example",
+                    username: "user",
+                    password: "pass"
+                )
+            ),
+            notificationCenter: notificationCenter
+        )
+    }
+
+    private func imageAuthScope(_ identity: String) -> RommImageAuthScope {
+        guard let url = URL(string: "https://romm.example"),
+              let scope = RommImageAuthScope(
+                url: url,
+                authorizationHeader: "AccountScope-\(identity)"
+              ) else {
+            preconditionFailure("Test image authentication scope must be valid")
+        }
+        return scope
     }
 
     private func statusResponseClient(

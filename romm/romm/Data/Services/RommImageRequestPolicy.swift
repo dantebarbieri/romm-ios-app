@@ -10,6 +10,7 @@ struct RommImageRequest: Equatable {
     let url: URL
     let accessPolicy: RommImageAccessPolicy
     let authorizationHeader: String?
+    let authScope: RommImageAuthScope?
 
     var usesRommAuthentication: Bool {
         authorizationHeader != nil
@@ -24,8 +25,7 @@ struct RommImageRequest: Equatable {
     }
 
     func kingfisherOptions(
-        rommDownloader: ImageDownloader,
-        rommCache: ImageCache
+        sessionManager: RommImageSessionManager
     ) -> KingfisherOptionsInfo {
         switch accessPolicy {
         case .publicExternal:
@@ -34,10 +34,14 @@ struct RommImageRequest: Equatable {
                 .cacheOriginalImage
             ]
         case .romm:
+            guard let authScope else {
+                assertionFailure("RomM image requests require an authentication scope")
+                return []
+            }
+            let session = sessionManager.session(for: authScope, url: url)
             var options: KingfisherOptionsInfo = [
-                .downloader(rommDownloader),
-                .targetCache(rommCache),
-                .forceRefresh,
+                .downloader(session.downloader),
+                .targetCache(session.cache),
                 .cacheMemoryOnly
             ]
             if let authorizationHeader {
@@ -91,7 +95,8 @@ struct RommImageRequestPolicy {
             return RommImageRequest(
                 url: absoluteURL,
                 accessPolicy: .publicExternal,
-                authorizationHeader: nil
+                authorizationHeader: nil,
+                authScope: nil
             )
         }
 
@@ -106,10 +111,17 @@ struct RommImageRequestPolicy {
         } catch APIClientError.noCredentials {
             authorizationHeader = nil
         }
+        guard let authScope = RommImageAuthScope(
+            url: url,
+            authorizationHeader: authorizationHeader
+        ) else {
+            throw APIClientError.invalidURL(reference)
+        }
         return RommImageRequest(
             url: url,
             accessPolicy: .romm,
-            authorizationHeader: authorizationHeader
+            authorizationHeader: authorizationHeader,
+            authScope: authScope
         )
     }
 }

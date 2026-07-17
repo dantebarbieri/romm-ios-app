@@ -120,6 +120,7 @@ class SetupRepository: PSetupRepository {
             
             logger.debug("JSON data size: \(jsonData.count) bytes")
             logger.info("Setup configuration saved as JSON successfully")
+            RommImageSessionManager.shared.authenticationScopeDidChange()
             
         } catch {
             logger.error("Failed to encode configuration as JSON: \(error)")
@@ -174,6 +175,7 @@ class SetupRepository: PSetupRepository {
         if getAuthMethod() == .clientToken {
             try clearClientTokenData()
         }
+        RommImageSessionManager.shared.reset()
         logger.info("Setup configuration cleared")
     }
     

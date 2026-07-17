@@ -167,6 +167,11 @@ class RommAPIClient: PRommAPIClient {
         }
     }
 
+    func notifySessionExpired() {
+        RommImageSessionManager.shared.reset()
+        notificationCenter.post(name: .sessionExpired, object: nil)
+    }
+
     // No-op after OpenAPI removal – credentials are read fresh on each request
     func invalidateConfiguration() {}
 
@@ -225,7 +230,7 @@ class RommAPIClient: PRommAPIClient {
                 return data
             case .unauthenticated:
                 logger.warning("Authentication failed - invalid credentials")
-                notificationCenter.post(name: .sessionExpired, object: nil)
+                notifySessionExpired()
                 throw APIClientError.authenticationRequired
             case .forbidden:
                 let msg = String(data: data, encoding: .utf8) ?? "Forbidden"
@@ -359,7 +364,7 @@ class RommAPIClient: PRommAPIClient {
 
                 case .unauthenticated:
                     self?.logger.warning("Authentication failed during download")
-                    self?.notificationCenter.post(name: .sessionExpired, object: nil)
+                    self?.notifySessionExpired()
                     continuation.resume(throwing: APIClientError.authenticationRequired)
 
                 case .forbidden, .clientError, .serverError:
@@ -438,7 +443,7 @@ class RommAPIClient: PRommAPIClient {
                 return data
             case .unauthenticated:
                 logger.warning("Authentication failed for multipart request")
-                notificationCenter.post(name: .sessionExpired, object: nil)
+                notifySessionExpired()
                 throw APIClientError.authenticationRequired
             case .forbidden:
                 let msg = String(data: data, encoding: .utf8) ?? "Forbidden"
@@ -499,7 +504,7 @@ class RommAPIClient: PRommAPIClient {
         case .success:
             return data
         case .unauthenticated:
-            notificationCenter.post(name: .sessionExpired, object: nil)
+            notifySessionExpired()
             throw APIClientError.authenticationRequired
         case .forbidden, .clientError, .serverError, .unexpected:
             let msg = String(data: data.prefix(500), encoding: .utf8) ?? "Error"

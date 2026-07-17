@@ -15,12 +15,15 @@ class KingfisherCacheManager: ObservableObject {
     static let shared = KingfisherCacheManager()
     
     private let settings = ImageCacheSettings.shared
+    private let legacyPrivateCache = ImageCache(name: "romm-private-assets")
     
     private init() {
         configureKingfisher()
     }
     
     func configureKingfisher() {
+        legacyPrivateCache.clearDiskCache()
+
         // Configure memory cache with reasonable defaults (not user-configurable)
         ImageCache.default.memoryStorage.config.totalCostLimit = 100 * 1024 * 1024 // 100 MB
         ImageCache.default.memoryStorage.config.countLimit = 500
@@ -37,8 +40,7 @@ class KingfisherCacheManager: ObservableObject {
         KingfisherManager.shared.defaultOptions = [
             .diskCacheExpiration(.seconds(settings.diskCacheExpirySeconds)),
             .backgroundDecode,
-            .scaleFactor(UIScreen.main.scale),
-            .cacheOriginalImage
+            .scaleFactor(UIScreen.main.scale)
         ]
 
         Logger.general.info("🖼️ Kingfisher configured: Memory=100MB, Disk=\(settings.diskCacheLimitBytes / 1024 / 1024)MB, Expiry=\(settings.diskCacheExpirySeconds / 86400)d")
