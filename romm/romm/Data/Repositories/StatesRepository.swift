@@ -34,9 +34,9 @@ final class StatesRepository: PStatesRepository {
         )
     }
 
-    func downloadState(id: Int) async throws -> Data {
-        logger.info("☁️ Downloading state id=\(id)")
-        return try await apiClient.downloadState(id: id)
+    func downloadState(path: String) async throws -> Data {
+        logger.info("☁️ Downloading state from server-provided path")
+        return try await apiClient.downloadState(path: path)
     }
 
     func deleteStates(ids: [Int]) async throws {

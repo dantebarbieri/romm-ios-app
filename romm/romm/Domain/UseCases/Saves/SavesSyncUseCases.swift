@@ -13,7 +13,7 @@ protocol PUpdateSaveUseCase {
 }
 
 protocol PDownloadSaveUseCase {
-    func execute(id: Int) async throws -> Data
+    func execute(downloadPath: String) async throws -> Data
 }
 
 final class ListServerSavesUseCase: PListServerSavesUseCase {
@@ -58,7 +58,7 @@ final class UpdateSaveUseCase: PUpdateSaveUseCase {
 final class DownloadSaveUseCase: PDownloadSaveUseCase {
     private let repository: PSavesRepository
     init(repository: PSavesRepository) { self.repository = repository }
-    func execute(id: Int) async throws -> Data {
-        try await repository.downloadSave(id: id)
+    func execute(downloadPath: String) async throws -> Data {
+        try await repository.downloadSave(path: downloadPath)
     }
 }

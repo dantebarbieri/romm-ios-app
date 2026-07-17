@@ -36,9 +36,9 @@ final class SavesRepository: PSavesRepository {
         )
     }
 
-    func downloadSave(id: Int) async throws -> Data {
-        logger.info("☁️ Downloading save id=\(id)")
-        return try await apiClient.downloadSave(id: id, deviceId: nil)
+    func downloadSave(path: String) async throws -> Data {
+        logger.info("☁️ Downloading save from server-provided path")
+        return try await apiClient.downloadSave(path: path)
     }
 
     func deleteSaves(ids: [Int]) async throws {

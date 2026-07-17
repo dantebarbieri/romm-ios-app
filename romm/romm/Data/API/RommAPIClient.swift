@@ -89,13 +89,13 @@ protocol PRommAPIClient {
     // Saves sync
     func uploadSave(romId: Int, emulator: String?, slot: String?, deviceId: String?, fileName: String, fileData: Data, screenshotData: Data?) async throws -> SaveSchema
     func updateSave(id: Int, emulator: String?, fileName: String, fileData: Data, screenshotData: Data?) async throws -> SaveSchema
-    func downloadSave(id: Int, deviceId: String?) async throws -> Data
+    func downloadSave(path: String) async throws -> Data
     func deleteSaves(ids: [Int]) async throws
 
     // States sync
     func uploadState(romId: Int, emulator: String?, fileName: String, fileData: Data, screenshotData: Data?) async throws -> StateSchema
     func updateState(id: Int, emulator: String?, fileName: String, fileData: Data, screenshotData: Data?) async throws -> StateSchema
-    func downloadState(id: Int) async throws -> Data
+    func downloadState(path: String) async throws -> Data
     func deleteStates(ids: [Int]) async throws
 }
 
@@ -183,11 +183,12 @@ class RommAPIClient: PRommAPIClient {
         logger.logNetworkRequest(method: method.rawValue, url: path)
 
         let url = try buildURL(path: path)
-        let authHeader = try makeAuthHeader()
 
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
-        request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        if let authHeader = try authorizationHeader(for: url) {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 30.0
@@ -276,17 +277,18 @@ class RommAPIClient: PRommAPIClient {
         logger.logNetworkRequest(method: HTTPMethod.get.rawValue, url: path)
 
         let url = try buildURL(path: path)
-        let authHeader = try makeAuthHeader()
 
         var request = URLRequest(url: url)
         request.httpMethod = HTTPMethod.get.rawValue
-        request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        if let authHeader = try authorizationHeader(for: url) {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 60.0
 
         logger.debug("Download URL: \(url.absoluteString)")
         #if DEBUG
-        logger.debug("Download Auth header (debug-only): \(authHeader)")
+        logger.debug("Download uses server authentication: \(isSameOriginAsServer(url))")
         #endif
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -408,12 +410,13 @@ class RommAPIClient: PRommAPIClient {
         logger.logNetworkRequest(method: method.rawValue, url: path)
 
         let url = try buildURL(path: path)
-        let authHeader = try makeAuthHeader()
 
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        if let authHeader = try authorizationHeader(for: url) {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 60.0
         additionalHeaders?.forEach { request.setValue($1, forHTTPHeaderField: $0) }
@@ -489,10 +492,11 @@ class RommAPIClient: PRommAPIClient {
 
     func getBinary(_ path: String) async throws -> Data {
         let url = try buildURL(path: path)
-        let authHeader = try makeAuthHeader()
         var request = URLRequest(url: url)
         request.httpMethod = HTTPMethod.get.rawValue
-        request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        if let authHeader = try authorizationHeader(for: url) {
+            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        }
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 30.0
         let (data, response) = try await urlSession.data(for: request)
@@ -546,13 +550,18 @@ class RommAPIClient: PRommAPIClient {
     // MARK: - Internal Helpers
 
     func buildURL(path: String) throws -> URL {
+        let cleanPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let absoluteURL = URL(string: cleanPath), absoluteURL.scheme != nil {
+            return absoluteURL
+        }
+
         guard let serverURL = tokenProvider.getServerURL() else {
             logger.error("No server URL configured")
             throw APIClientError.noConfiguration
         }
         let cleanServerURL = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let fullURLString = "\(cleanServerURL)/\(cleanPath)"
+        let relativePath = cleanPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let fullURLString = "\(cleanServerURL)/\(relativePath)"
         guard let url = URL(string: fullURLString) else {
             logger.error("Invalid URL: \(fullURLString)")
             throw APIClientError.invalidURL(fullURLString)
@@ -581,6 +590,31 @@ class RommAPIClient: PRommAPIClient {
                 throw APIClientError.authenticationRequired
             }
             return "Basic \(loginData.base64EncodedString())"
+        }
+    }
+
+    func authorizationHeader(for url: URL) throws -> String? {
+        guard isSameOriginAsServer(url) else { return nil }
+        return try makeAuthHeader()
+    }
+
+    func isSameOriginAsServer(_ url: URL) -> Bool {
+        guard let serverURL = tokenProvider.getServerURL(),
+              let configuredURL = URL(string: serverURL) else {
+            return false
+        }
+
+        return url.scheme?.lowercased() == configuredURL.scheme?.lowercased()
+            && url.host?.lowercased() == configuredURL.host?.lowercased()
+            && effectivePort(for: url) == effectivePort(for: configuredURL)
+    }
+
+    private func effectivePort(for url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
         }
     }
 

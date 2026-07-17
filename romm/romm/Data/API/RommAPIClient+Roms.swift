@@ -17,6 +17,8 @@ extension RommAPIClient {
         let path = withQuery("api/roms", [
             ("search_term", searchTerm),
             ("platform_ids", platformId.map(String.init)),
+            ("order_by", "name"),
+            ("order_dir", "asc"),
             ("limit", String(limit))
         ])
         return try await get(path, responseType: CustomLimitOffsetPageSimpleRomSchema.self)
@@ -80,6 +82,8 @@ extension RommAPIClient {
         logger.info("🔍 Search: Searching for '\(query)'")
         let path = withQuery("api/roms", [
             ("search_term", query),
+            ("order_by", "name"),
+            ("order_dir", "asc"),
             ("limit", "50"),
             ("offset", "0")
         ])

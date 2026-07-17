@@ -13,7 +13,7 @@ protocol PUpdateStateUseCase {
 }
 
 protocol PDownloadStateUseCase {
-    func execute(id: Int) async throws -> Data
+    func execute(downloadPath: String) async throws -> Data
 }
 
 final class ListServerStatesUseCase: PListServerStatesUseCase {
@@ -57,7 +57,7 @@ final class UpdateStateUseCase: PUpdateStateUseCase {
 final class DownloadStateUseCase: PDownloadStateUseCase {
     private let repository: PStatesRepository
     init(repository: PStatesRepository) { self.repository = repository }
-    func execute(id: Int) async throws -> Data {
-        try await repository.downloadState(id: id)
+    func execute(downloadPath: String) async throws -> Data {
+        try await repository.downloadState(path: downloadPath)
     }
 }

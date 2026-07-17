@@ -84,7 +84,7 @@ final class SyncSaveViewModel {
         Task {
             defer { downloadingStateIds.remove(state.id) }
             do {
-                let data = try await downloadStateUseCase.execute(id: state.id)
+                let data = try await downloadStateUseCase.execute(downloadPath: state.downloadPath)
                 guard !data.isEmpty else { errorMessage = "Server returned empty file."; return }
                 let slot = slotFromFileName(state.fileName) ?? 0
                 try saveStore.writeState(romId: rom.id, slot: slot, data: data)
@@ -105,7 +105,7 @@ final class SyncSaveViewModel {
         Task {
             defer { downloadingSaveIds.remove(save.id) }
             do {
-                let data = try await downloadSaveUseCase.execute(id: save.id)
+                let data = try await downloadSaveUseCase.execute(downloadPath: save.downloadPath)
                 guard !data.isEmpty else { errorMessage = "Server returned empty file."; return }
                 try saveStore.writeBattery(romId: rom.id, data: data)
                 hasLocalBattery = true

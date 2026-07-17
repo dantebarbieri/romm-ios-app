@@ -25,7 +25,12 @@ struct HeartbeatRepositoryTests {
 
     @Test func maxSupportedVersionIsCompatible() {
         let repo = HeartbeatRepository()
-        #expect(repo.isVersionCompatible("4.8.1") == true)
+        #expect(repo.isVersionCompatible("5.0.0") == true)
+    }
+
+    @Test func latestRomMFourVersionIsCompatible() {
+        let repo = HeartbeatRepository()
+        #expect(repo.isVersionCompatible("4.9.2") == true)
     }
 
     @Test func versionBelowMinIsNotCompatible() {
@@ -35,7 +40,7 @@ struct HeartbeatRepositoryTests {
 
     @Test func versionAboveMaxIsNotCompatible() {
         let repo = HeartbeatRepository()
-        #expect(repo.isVersionCompatible("4.9.0") == false)
+        #expect(repo.isVersionCompatible("5.0.1") == false)
     }
 
     @Test func prereleaseVersionStripsCorrectly() {

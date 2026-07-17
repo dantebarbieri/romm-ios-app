@@ -99,10 +99,7 @@ extension RommAPIClient {
         }
     }
 
-    func downloadSave(id: Int, deviceId: String?) async throws -> Data {
-        let path = withQuery("api/saves/\(id)/content", [
-            ("device_id", deviceId)
-        ])
+    func downloadSave(path: String) async throws -> Data {
         return try await getBinary(path)
     }
 

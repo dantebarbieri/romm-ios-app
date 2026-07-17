@@ -63,7 +63,7 @@ private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
     private func loadImage() {
         guard let url = url else { return }
 
-        let options: KingfisherOptionsInfo = [
+        var options: KingfisherOptionsInfo = [
             .diskCacheExpiration(.days(30)),
             .backgroundDecode,
             .scaleFactor(UIScreen.main.scale),
@@ -71,6 +71,13 @@ private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
             .cacheOriginalImage,
             .transition(.fade(0.2))
         ]
+        if let authHeader = try? RommAPIClient.shared.authorizationHeader(for: url) {
+            options.append(.requestModifier(AnyModifier { request in
+                var authenticatedRequest = request
+                authenticatedRequest.setValue(authHeader, forHTTPHeaderField: "Authorization")
+                return authenticatedRequest
+            }))
+        }
 
         KingfisherManager.shared.retrieveImage(with: url, options: options) { result in
             switch result {
@@ -117,14 +124,14 @@ extension CachedKFImage {
         @ViewBuilder content: @escaping (Image) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) {
-        let url = urlString.flatMap(URL.init)
+        let url = urlString.flatMap { try? RommAPIClient.shared.buildURL(path: $0) }
         self.init(url: url, content: content, placeholder: placeholder)
     }
 }
 
 extension CachedKFImage where Content == Image, Placeholder == Color {
     init(urlString: String?) {
-        let url = urlString.flatMap(URL.init)
+        let url = urlString.flatMap { try? RommAPIClient.shared.buildURL(path: $0) }
         self.init(url: url)
     }
 }
