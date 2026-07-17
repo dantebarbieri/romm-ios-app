@@ -10,7 +10,12 @@ import Foundation
 // MARK: - Auth API Wrapper
 extension RommAPIClient {
     func login() async throws -> String {
-        let data = try await post("api/login")
+        let data = try await makeRequest(
+            path: "api/login",
+            method: .post,
+            body: nil,
+            expiresSessionOnUnauthorized: false
+        )
         return String(data: data, encoding: .utf8) ?? ""
     }
 

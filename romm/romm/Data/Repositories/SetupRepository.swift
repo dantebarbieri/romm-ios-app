@@ -111,6 +111,7 @@ class SetupRepository: PSetupRepository {
         logger.debug("Has Token: \(config.token != nil)")
         logger.debug("Has Refresh Token: \(config.refreshToken != nil)")
         logger.debug("Allow Incompatible Version Login: \(config.allowIncompatibleVersionLogin)")
+        RommImageSessionManager.shared.reset()
         
         do {
             let jsonData = try JSONEncoder().encode(config)
@@ -446,9 +447,9 @@ class SetupRepository: PSetupRepository {
     
     func saveAuthMethod(_ method: AuthMethod) throws {
         logger.info("💾 Saving auth method: \(method.displayName)")
-        
+        RommImageSessionManager.shared.reset()
         UserDefaults.standard.set(method.rawValue, forKey: authMethodKey)
-        
+        RommImageSessionManager.shared.authenticationScopeDidChange()
         logger.info("✅ Auth method saved")
     }
     

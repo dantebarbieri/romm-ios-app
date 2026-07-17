@@ -124,6 +124,7 @@ class DefaultConfigurationService: ConfigurationService {
     
     func clearConfiguration() throws {
         logger.info("Clearing configuration...")
+        RommImageSessionManager.shared.reset()
         UserDefaults.standard.removeObject(forKey: setupConfigurationKey)
         logger.info("Configuration cleared")
     }
@@ -191,7 +192,9 @@ class DefaultConfigurationService: ConfigurationService {
                     // Save updated JSON
                     if let updatedJsonData = try? JSONSerialization.data(withJSONObject: json),
                        let updatedJsonString = String(data: updatedJsonData, encoding: .utf8) {
+                        RommImageSessionManager.shared.reset()
                         UserDefaults.standard.set(updatedJsonString, forKey: setupConfigurationKey)
+                        RommImageSessionManager.shared.authenticationScopeDidChange()
                     }
                 }
                 

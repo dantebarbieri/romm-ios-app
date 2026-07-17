@@ -42,7 +42,12 @@ struct RommImageRequest: Equatable {
             var options: KingfisherOptionsInfo = [
                 .downloader(session.downloader),
                 .targetCache(session.cache),
-                .cacheMemoryOnly
+                .cacheMemoryOnly,
+                .redirectHandler(
+                    sessionManager.redirectHandler(
+                        authorizationHeader: authorizationHeader
+                    )
+                )
             ]
             if let authorizationHeader {
                 options.append(.requestModifier(AnyModifier { request in

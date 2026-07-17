@@ -247,6 +247,36 @@ struct RomMAPICompatibilityTests {
         #expect(sessionManager.currentSession == nil)
     }
 
+    @Test func privateImageRedirectsRemainSameOrigin() throws {
+        let client = RommAPIClient(
+            tokenProvider: MockTokenProvider(
+                serverURL: "https://romm.example",
+                username: "user",
+                password: "pass"
+            )
+        )
+        let handler = RommImageRedirectHandler(
+            apiClient: client,
+            authorizationHeader: "TestAuthorization"
+        )
+        let sameOriginURL = try #require(
+            URL(string: "https://romm.example:443/api/screenshots/4/content")
+        )
+        let crossOriginURL = try #require(
+            URL(string: "https://cdn.example/screenshots/4.jpg")
+        )
+
+        let sameOriginRequest = try #require(
+            handler.redirectedRequest(URLRequest(url: sameOriginURL))
+        )
+
+        #expect(
+            sameOriginRequest.value(forHTTPHeaderField: "Authorization")
+                == "TestAuthorization"
+        )
+        #expect(handler.redirectedRequest(URLRequest(url: crossOriginURL)) == nil)
+    }
+
     @Test func unsafeImageURLsAreRejected() {
         let policy = authenticatedImagePolicy()
 
@@ -518,9 +548,190 @@ struct RomMAPICompatibilityTests {
         } catch {
             Issue.record("Expected authentication failure, got \(error)")
         }
+        do {
+            _ = try await client.get("status/401")
+            Issue.record("Expected repeated authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected repeated authentication failure, got \(error)")
+        }
 
         #expect(counter.value == 1)
         #expect(APIResponseStatusPolicy.classify(401).shouldExpireSession)
+    }
+
+    @Test func concurrentSameScopeUnauthorizedResponsesExpireOnce() {
+        let manager = imageSessionManager()
+        let firstRequest = manager.captureRequestScope(isAuthenticated: true)
+        let secondRequest = manager.captureRequestScope(isAuthenticated: true)
+        let counter = NotificationCounter()
+
+        let firstExpired = manager.expireSessionIfCurrent(firstRequest) { _ in
+            counter.increment()
+        }
+        let secondExpired = manager.expireSessionIfCurrent(secondRequest) { _ in
+            counter.increment()
+        }
+
+        #expect(firstExpired)
+        #expect(!secondExpired)
+        #expect(counter.value == 1)
+    }
+
+    @Test func logoutLoginInvalidatesInFlightRequestScope() {
+        let manager = imageSessionManager()
+        let oldRequest = manager.captureRequestScope(isAuthenticated: true)
+        manager.reset()
+        manager.authenticationScopeDidChange()
+        var notified = false
+
+        let expired = manager.expireSessionIfCurrent(oldRequest) { _ in
+            notified = true
+        }
+
+        #expect(!expired)
+        #expect(!notified)
+    }
+
+    @Test func tokenRotationInvalidatesInFlightRequestScope() {
+        let manager = imageSessionManager()
+        let oldRequest = manager.captureRequestScope(isAuthenticated: true)
+        manager.authenticationScopeDidChange()
+        var notified = false
+
+        let expired = manager.expireSessionIfCurrent(oldRequest) { _ in
+            notified = true
+        }
+
+        #expect(!expired)
+        #expect(!notified)
+    }
+
+    @Test func authenticatedRequestAcquisitionIsBlockedDuringMutation() {
+        let manager = imageSessionManager()
+        manager.reset()
+        let generation = manager.captureRequestGeneration()
+
+        let requestScope = manager.captureRequestScope(
+            ifCurrent: generation,
+            isAuthenticated: true
+        )
+        let loginProbeScope = manager.captureRequestScope(
+            ifCurrent: generation,
+            isAuthenticated: false
+        )
+
+        #expect(requestScope == nil)
+        #expect(loginProbeScope != nil)
+        #expect(!manager.authenticationRequestsAreAvailable)
+    }
+
+    @Test func staleExpirationTokenCannotClearNewAuthentication() {
+        let manager = imageSessionManager()
+        let requestScope = manager.captureRequestScope(isAuthenticated: true)
+        var staleExpirationWasRejected = false
+
+        let expired = manager.expireSessionIfCurrent(requestScope) { expiration in
+            manager.authenticationScopeDidChange()
+            staleExpirationWasRejected = !manager.isCurrentExpiration(expiration)
+        }
+
+        #expect(expired)
+        #expect(staleExpirationWasRejected)
+    }
+
+    @Test func staleSharedRequestUnauthorizedDoesNotExpireNewScope() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let sessionObserver = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(sessionObserver) }
+
+        let context = statusResponseContext(notificationCenter: notificationCenter)
+        let switchAction = AuthenticationSwitchAction(context: context)
+        let switchID = UUID().uuidString
+        let switchObserver = NotificationCenter.default.addObserver(
+            forName: .statusResponseWillSwitchAuthentication,
+            object: nil,
+            queue: nil
+        ) { notification in
+            guard notification.object as? String == switchID else { return }
+            switchAction.switchAuthentication()
+        }
+        defer { NotificationCenter.default.removeObserver(switchObserver) }
+
+        do {
+            _ = try await context.client.get(
+                "status/switch-auth/401?switch=\(switchID)"
+            )
+            Issue.record("Expected stale request authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected stale authentication failure, got \(error)")
+        }
+
+        #expect(counter.value == 0)
+        let currentRequest = try RommImageRequestPolicy(
+            apiClient: context.client
+        ).resolve("/api/screenshots/4/content")
+        _ = currentRequest.kingfisherOptions(
+            sessionManager: context.authenticationSessionManager
+        )
+        let currentSession = try #require(
+            context.authenticationSessionManager.currentSession
+        )
+        #expect(!currentSession.isInvalidated)
+    }
+
+    @Test func authChangeDuringRequestConstructionRebuildsScope() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let tokenProvider = GenerationSwitchingTokenProvider(
+            serverURL: "https://romm.example"
+        )
+        let manager = RommImageSessionManager(
+            apiClient: RommAPIClient(
+                tokenProvider: tokenProvider,
+                notificationCenter: notificationCenter
+            ),
+            notificationCenter: notificationCenter
+        )
+        tokenProvider.onFirstTokenRead = {
+            manager.authenticationScopeDidChange()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StatusResponseURLProtocol.self]
+        let client = RommAPIClient(
+            tokenProvider: tokenProvider,
+            urlSession: URLSession(configuration: configuration),
+            notificationCenter: notificationCenter,
+            authenticationSessionManager: manager
+        )
+
+        do {
+            _ = try await client.get("status/401")
+            Issue.record("Expected authentication failure after request rebuild")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected rebuilt authentication failure, got \(error)")
+        }
+
+        #expect(tokenProvider.tokenReadCount >= 2)
+        #expect(counter.value == 1)
     }
 
     @Test func forbiddenResponseRemainsPermissionFailure() async throws {
@@ -574,6 +785,104 @@ struct RomMAPICompatibilityTests {
         }
 
         #expect(counter.value == 1)
+    }
+
+    @Test func staleManualUnauthorizedDoesNotExpireNewScope() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let sessionObserver = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(sessionObserver) }
+
+        let context = statusResponseContext(notificationCenter: notificationCenter)
+        let switchAction = AuthenticationSwitchAction(context: context)
+        let switchID = UUID().uuidString
+        let switchObserver = NotificationCenter.default.addObserver(
+            forName: .statusResponseWillSwitchAuthentication,
+            object: nil,
+            queue: nil
+        ) { notification in
+            guard notification.object as? String == switchID else { return }
+            switchAction.switchAuthentication()
+        }
+        defer { NotificationCenter.default.removeObserver(switchObserver) }
+
+        do {
+            _ = try await context.client.getManualPDFData(
+                manualURL: "https://romm.example/status/switch-auth/401?switch=\(switchID)"
+            )
+            Issue.record("Expected stale manual authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected stale manual authentication failure, got \(error)")
+        }
+
+        #expect(counter.value == 0)
+        let currentRequest = try RommImageRequestPolicy(
+            apiClient: context.client
+        ).resolve("/api/screenshots/4/content")
+        _ = currentRequest.kingfisherOptions(
+            sessionManager: context.authenticationSessionManager
+        )
+        let currentSession = try #require(
+            context.authenticationSessionManager.currentSession
+        )
+        #expect(!currentSession.isInvalidated)
+    }
+
+    @Test func externalManualUnauthorizedDoesNotExpireRomMSession() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let client = statusResponseClient(notificationCenter: notificationCenter)
+        do {
+            _ = try await client.getManualPDFData(
+                manualURL: "https://manuals.example/status/401"
+            )
+            Issue.record("Expected external manual authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected external manual authentication failure, got \(error)")
+        }
+
+        #expect(counter.value == 0)
+    }
+
+    @Test func loginProbeUnauthorizedDoesNotExpireSession() async throws {
+        let counter = NotificationCounter()
+        let notificationCenter = NotificationCenter()
+        let observer = notificationCenter.addObserver(
+            forName: .sessionExpired,
+            object: nil,
+            queue: nil
+        ) { _ in
+            counter.increment()
+        }
+        defer { notificationCenter.removeObserver(observer) }
+
+        let client = statusResponseClient(notificationCenter: notificationCenter)
+        do {
+            _ = try await client.login()
+            Issue.record("Expected login authentication failure")
+        } catch APIClientError.authenticationRequired {
+        } catch {
+            Issue.record("Expected login authentication failure, got \(error)")
+        }
+
+        #expect(counter.value == 0)
     }
 
     @Test func manualDownloadForbiddenResponseRemainsPermissionFailure() async throws {
@@ -778,15 +1087,34 @@ struct RomMAPICompatibilityTests {
     private func statusResponseClient(
         notificationCenter: NotificationCenter
     ) -> RommAPIClient {
+        statusResponseContext(notificationCenter: notificationCenter).client
+    }
+
+    private func statusResponseContext(
+        notificationCenter: NotificationCenter
+    ) -> StatusResponseContext {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StatusResponseURLProtocol.self]
         let tokenProvider = MockTokenProvider(serverURL: "https://romm.example")
         tokenProvider.mockAuthMethod = .clientToken
         tokenProvider.mockClientToken = "rmm_test"
-        return RommAPIClient(
+        let authenticationSessionManager = RommImageSessionManager(
+            apiClient: RommAPIClient(
+                tokenProvider: tokenProvider,
+                notificationCenter: notificationCenter
+            ),
+            notificationCenter: notificationCenter
+        )
+        let client = RommAPIClient(
             tokenProvider: tokenProvider,
             urlSession: URLSession(configuration: configuration),
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            authenticationSessionManager: authenticationSessionManager
+        )
+        return StatusResponseContext(
+            client: client,
+            authenticationSessionManager: authenticationSessionManager,
+            tokenProvider: tokenProvider
         )
     }
 
@@ -835,6 +1163,12 @@ struct RomMAPICompatibilityTests {
     }
 }
 
+private struct StatusResponseContext {
+    let client: RommAPIClient
+    let authenticationSessionManager: RommImageSessionManager
+    let tokenProvider: MockTokenProvider
+}
+
 private final class NotificationCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -863,7 +1197,7 @@ private final class StatusResponseURLProtocol: URLProtocol {
 
     override func startLoading() {
         guard let url = request.url,
-              let statusCode = Int(url.lastPathComponent),
+              let statusCode = statusCode(for: url),
               let response = HTTPURLResponse(
                   url: url,
                   statusCode: statusCode,
@@ -873,6 +1207,16 @@ private final class StatusResponseURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
+        if url.path.contains("/switch-auth/"),
+           let switchID = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+           )?.queryItems?.first(where: { $0.name == "switch" })?.value {
+            NotificationCenter.default.post(
+                name: .statusResponseWillSwitchAuthentication,
+                object: switchID
+            )
+        }
         let data = Data(#"{"detail":"Permission denied"}"#.utf8)
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
@@ -880,6 +1224,79 @@ private final class StatusResponseURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private func statusCode(for url: URL) -> Int? {
+        if url.lastPathComponent == "login" {
+            return 401
+        }
+        return Int(url.lastPathComponent)
+    }
+}
+
+private extension Notification.Name {
+    static let statusResponseWillSwitchAuthentication = Notification.Name(
+        "StatusResponseWillSwitchAuthentication"
+    )
+}
+
+private final class AuthenticationSwitchAction: @unchecked Sendable {
+    private let tokenProvider: MockTokenProvider
+    private let authenticationSessionManager: RommImageSessionManager
+
+    init(context: StatusResponseContext) {
+        tokenProvider = context.tokenProvider
+        authenticationSessionManager = context.authenticationSessionManager
+    }
+
+    func switchAuthentication() {
+        tokenProvider.mockClientToken = "rmm_switched"
+        authenticationSessionManager.authenticationScopeDidChange()
+    }
+}
+
+private final class GenerationSwitchingTokenProvider: MockTokenProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    var onFirstTokenRead: (() -> Void)?
+
+    var tokenReadCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return reads
+    }
+
+    override init(
+        token: String? = nil,
+        serverURL: String? = nil,
+        username: String? = nil,
+        password: String? = nil,
+        configured: Bool = false
+    ) {
+        super.init(
+            token: token,
+            serverURL: serverURL,
+            username: username,
+            password: password,
+            configured: configured
+        )
+        mockAuthMethod = .clientToken
+        mockClientToken = "rmm_initial"
+    }
+
+    override func getClientToken() -> String? {
+        lock.lock()
+        reads += 1
+        let isFirstRead = reads == 1
+        let token = mockClientToken
+        if isFirstRead {
+            mockClientToken = "rmm_rotated"
+        }
+        let action = isFirstRead ? onFirstTokenRead : nil
+        lock.unlock()
+
+        action?()
+        return token
+    }
 }
 
 private final class SaveDownloadRepositoryStub: PSavesRepository {

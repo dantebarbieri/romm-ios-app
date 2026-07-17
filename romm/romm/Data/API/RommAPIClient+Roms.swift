@@ -128,6 +128,7 @@ extension RommAPIClient {
     }
 
     func getManualPDFData(manualURL: String) async throws -> Data {
+        let requestGeneration = captureAuthenticationRequestGeneration()
         guard let url = URL(string: manualURL) else {
             throw APIClientError.invalidURL(manualURL)
         }
@@ -140,6 +141,13 @@ extension RommAPIClient {
             forHTTPHeaderField: "User-Agent"
         )
         request.timeoutInterval = 60.0
+        guard let requestScope = try captureAuthenticationRequestScope(
+            for: request,
+            ifCurrent: requestGeneration,
+            includeConfiguredSession: true
+        ) else {
+            return try await getManualPDFData(manualURL: manualURL)
+        }
 
         logger.debug("Attempting PDF download from: \(manualURL)")
 
@@ -162,7 +170,10 @@ extension RommAPIClient {
                 }
                 return data
             case .unauthenticated:
-                notifySessionExpired()
+                notifySessionExpired(
+                    ifCurrent: requestScope,
+                    response: httpResponse
+                )
                 throw APIClientError.authenticationRequired
             case .forbidden, .clientError, .serverError, .unexpected:
                 let msg = String(data: data, encoding: .utf8) ?? "PDF download failed"

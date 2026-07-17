@@ -70,9 +70,16 @@ class AppViewModel {
             forName: .sessionExpired,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            guard let expiration = notification.object as? RommSessionExpiration else {
+                return
+            }
             Task { @MainActor in
-                self?.handleSessionExpiration()
+                RommImageSessionManager.shared.performIfCurrentExpiration(
+                    expiration
+                ) {
+                    self?.handleSessionExpiration()
+                }
             }
         }
     }

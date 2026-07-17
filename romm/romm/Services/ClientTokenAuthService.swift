@@ -294,6 +294,7 @@ extension ClientTokenAuthService {
 
     /// Saves the client token string and its info to the Keychain.
     func saveToken(_ token: String, info: ClientTokenInfo) throws {
+        RommImageSessionManager.shared.reset()
         do {
             try keychainService.save(key: Self.tokenKeychainKey, value: token)
         } catch {
@@ -315,6 +316,7 @@ extension ClientTokenAuthService {
         }
 
         logger.info("Client token and info saved to Keychain")
+        RommImageSessionManager.shared.authenticationScopeDidChange()
     }
 
     /// Reads the stored client token string from the Keychain.
@@ -333,6 +335,7 @@ extension ClientTokenAuthService {
 
     /// Deletes both the token and token info from the Keychain.
     func clearToken() {
+        RommImageSessionManager.shared.reset()
         try? keychainService.delete(key: Self.tokenKeychainKey)
         try? keychainService.delete(key: Self.tokenInfoKeychainKey)
         logger.info("Client token cleared from Keychain")

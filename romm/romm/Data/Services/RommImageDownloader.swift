@@ -17,10 +17,19 @@ struct RommImageAuthScope: Hashable {
     }
 }
 
+struct RommAuthenticationRequestScope: Equatable, Sendable {
+    fileprivate let generation: Int
+    fileprivate let isAuthenticated: Bool
+}
+
+struct RommSessionExpiration: Equatable, Sendable {
+    fileprivate let generation: Int
+}
+
 final class RommImageSessionManager: @unchecked Sendable {
     static let shared = RommImageSessionManager()
 
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
     private let apiClient: RommAPIClient
     private let notificationCenter: NotificationCenter
     private var activeScope: RommImageAuthScope?
@@ -87,6 +96,7 @@ final class RommImageSessionManager: @unchecked Sendable {
     func reset() {
         lock.lock()
         authenticationInvalidated = true
+        scopeGeneration &+= 1
         let previousSession = activeSession
         activeScope = nil
         activeSession = nil
@@ -100,9 +110,102 @@ final class RommImageSessionManager: @unchecked Sendable {
         activeScope = nil
         activeSession = nil
         authenticationInvalidated = false
-        scopeGeneration += 1
+        scopeGeneration &+= 1
         previousSession?.invalidate()
         lock.unlock()
+    }
+
+    func captureRequestScope(
+        isAuthenticated: Bool
+    ) -> RommAuthenticationRequestScope {
+        lock.lock()
+        defer { lock.unlock() }
+        return RommAuthenticationRequestScope(
+            generation: scopeGeneration,
+            isAuthenticated: isAuthenticated
+        )
+    }
+
+    func redirectHandler(
+        authorizationHeader: String?
+    ) -> RommImageRedirectHandler {
+        RommImageRedirectHandler(
+            apiClient: apiClient,
+            authorizationHeader: authorizationHeader
+        )
+    }
+
+    func captureRequestGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return scopeGeneration
+    }
+
+    func captureRequestScope(
+        ifCurrent generation: Int,
+        isAuthenticated: Bool
+    ) -> RommAuthenticationRequestScope? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == scopeGeneration,
+              !isAuthenticated
+                || (!authenticationInvalidated
+                    && !expirationNotificationPending) else {
+            return nil
+        }
+        return RommAuthenticationRequestScope(
+            generation: generation,
+            isAuthenticated: isAuthenticated
+        )
+    }
+
+    @discardableResult
+    func expireSessionIfCurrent(
+        _ requestScope: RommAuthenticationRequestScope,
+        notify: (RommSessionExpiration) -> Void
+    ) -> Bool {
+        lock.lock()
+        guard requestScope.isAuthenticated,
+              requestScope.generation == scopeGeneration,
+              !authenticationInvalidated else {
+            lock.unlock()
+            return false
+        }
+        let expiration = beginExpirationLocked()
+        lock.unlock()
+
+        notify(expiration)
+        finishExpirationNotification()
+        return true
+    }
+
+    var authenticationRequestsAreAvailable: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !authenticationInvalidated
+            && !expirationNotificationPending
+    }
+
+    func isCurrentExpiration(_ expiration: RommSessionExpiration) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return authenticationInvalidated
+            && expiration.generation == scopeGeneration
+    }
+
+    @discardableResult
+    func performIfCurrentExpiration(
+        _ expiration: RommSessionExpiration,
+        action: () -> Void
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard authenticationInvalidated,
+              expiration.generation == scopeGeneration else {
+            return false
+        }
+        action()
+        return true
     }
 
     private func handleUnauthorized(sessionID: UUID) {
@@ -111,17 +214,25 @@ final class RommImageSessionManager: @unchecked Sendable {
             lock.unlock()
             return
         }
+        let expiration = beginExpirationLocked()
+        lock.unlock()
+
+        notificationCenter.post(name: .sessionExpired, object: expiration)
+        finishExpirationNotification()
+    }
+
+    private func beginExpirationLocked() -> RommSessionExpiration {
         authenticationInvalidated = true
         expirationNotificationPending = true
+        scopeGeneration &+= 1
         let expiredSession = activeSession
         activeScope = nil
         activeSession = nil
-
         expiredSession?.invalidate()
-        lock.unlock()
+        return RommSessionExpiration(generation: scopeGeneration)
+    }
 
-        notificationCenter.post(name: .sessionExpired, object: sessionID)
-
+    private func finishExpirationNotification() {
         lock.lock()
         expirationNotificationPending = false
         lock.unlock()
@@ -167,6 +278,39 @@ final class RommImageSessionManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return activeSession
+    }
+}
+
+final class RommImageRedirectHandler: ImageDownloadRedirectHandler, @unchecked Sendable {
+    private let apiClient: RommAPIClient
+    private let authorizationHeader: String?
+
+    init(apiClient: RommAPIClient, authorizationHeader: String?) {
+        self.apiClient = apiClient
+        self.authorizationHeader = authorizationHeader
+    }
+
+    func handleHTTPRedirection(
+        for task: SessionDataTask,
+        response: HTTPURLResponse,
+        newRequest: URLRequest
+    ) async -> URLRequest? {
+        redirectedRequest(newRequest)
+    }
+
+    func redirectedRequest(_ request: URLRequest) -> URLRequest? {
+        guard let url = request.url,
+              apiClient.isSameOriginAsServer(url) else {
+            return nil
+        }
+        var authenticatedRequest = request
+        if let authorizationHeader {
+            authenticatedRequest.setValue(
+                authorizationHeader,
+                forHTTPHeaderField: "Authorization"
+            )
+        }
+        return authenticatedRequest
     }
 }
 

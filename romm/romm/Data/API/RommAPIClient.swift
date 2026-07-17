@@ -144,14 +144,17 @@ class RommAPIClient: PRommAPIClient {
     let notificationCenter: NotificationCenter
     let logger = Logger.network
     private let sessionDelegate = PrivateNetworkURLSessionDelegate()
+    private let injectedAuthenticationSessionManager: RommImageSessionManager?
 
     init(
         tokenProvider: PTokenProvider = TokenProvider(),
         urlSession: URLSession? = nil,
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        authenticationSessionManager: RommImageSessionManager? = nil
     ) {
         self.tokenProvider = tokenProvider
         self.notificationCenter = notificationCenter
+        injectedAuthenticationSessionManager = authenticationSessionManager
 
         if let urlSession = urlSession {
             self.urlSession = urlSession
@@ -167,9 +170,18 @@ class RommAPIClient: PRommAPIClient {
         }
     }
 
-    func notifySessionExpired() {
-        RommImageSessionManager.shared.reset()
-        notificationCenter.post(name: .sessionExpired, object: nil)
+    @discardableResult
+    func notifySessionExpired(
+        ifCurrent requestScope: RommAuthenticationRequestScope,
+        response: HTTPURLResponse
+    ) -> Bool {
+        guard let responseURL = response.url,
+              isSameOriginAsServer(responseURL) else {
+            return false
+        }
+        return authenticationSessionManager.expireSessionIfCurrent(requestScope) {
+            notificationCenter.post(name: .sessionExpired, object: $0)
+        }
     }
 
     // No-op after OpenAPI removal – credentials are read fresh on each request
@@ -192,8 +204,24 @@ class RommAPIClient: PRommAPIClient {
     // MARK: - makeRequest (raw Data)
 
     func makeRequest(path: String, method: HTTPMethod, body: Data? = nil) async throws -> Data {
+        try await makeRequest(
+            path: path,
+            method: method,
+            body: body,
+            expiresSessionOnUnauthorized: true
+        )
+    }
+
+    func makeRequest(
+        path: String,
+        method: HTTPMethod,
+        body: Data?,
+        expiresSessionOnUnauthorized: Bool
+    ) async throws -> Data {
         let measurement = PerformanceMeasurement(operation: "\(method.rawValue) \(path)")
         logger.logNetworkRequest(method: method.rawValue, url: path)
+        let requestGeneration = authenticationSessionManager
+            .captureRequestGeneration()
 
         let url = try buildURL(path: path)
 
@@ -209,6 +237,18 @@ class RommAPIClient: PRommAPIClient {
         if let body {
             request.httpBody = body
             logger.debug("Request body size: \(body.count) bytes")
+        }
+        guard let requestScope = try captureAuthenticationRequestScope(
+            for: request,
+            ifCurrent: requestGeneration,
+            expiresSessionOnUnauthorized: expiresSessionOnUnauthorized
+        ) else {
+            return try await makeRequest(
+                path: path,
+                method: method,
+                body: body,
+                expiresSessionOnUnauthorized: expiresSessionOnUnauthorized
+            )
         }
 
         logger.info("Request URL: \(url.absoluteString)")
@@ -230,7 +270,10 @@ class RommAPIClient: PRommAPIClient {
                 return data
             case .unauthenticated:
                 logger.warning("Authentication failed - invalid credentials")
-                notifySessionExpired()
+                notifySessionExpired(
+                    ifCurrent: requestScope,
+                    response: httpResponse
+                )
                 throw APIClientError.authenticationRequired
             case .forbidden:
                 let msg = String(data: data, encoding: .utf8) ?? "Forbidden"
@@ -280,6 +323,8 @@ class RommAPIClient: PRommAPIClient {
     func downloadFile(path: String, progressHandler: ((Int64, Int64) -> Void)? = nil) async throws -> URL {
         let measurement = PerformanceMeasurement(operation: "DOWNLOAD \(path)")
         logger.logNetworkRequest(method: HTTPMethod.get.rawValue, url: path)
+        let requestGeneration = authenticationSessionManager
+            .captureRequestGeneration()
 
         let url = try buildURL(path: path)
 
@@ -290,6 +335,15 @@ class RommAPIClient: PRommAPIClient {
         }
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 60.0
+        guard let requestScope = try captureAuthenticationRequestScope(
+            for: request,
+            ifCurrent: requestGeneration
+        ) else {
+            return try await downloadFile(
+                path: path,
+                progressHandler: progressHandler
+            )
+        }
 
         logger.debug("Download URL: \(url.absoluteString)")
         #if DEBUG
@@ -364,7 +418,10 @@ class RommAPIClient: PRommAPIClient {
 
                 case .unauthenticated:
                     self?.logger.warning("Authentication failed during download")
-                    self?.notifySessionExpired()
+                    self?.notifySessionExpired(
+                        ifCurrent: requestScope,
+                        response: httpResponse
+                    )
                     continuation.resume(throwing: APIClientError.authenticationRequired)
 
                 case .forbidden, .clientError, .serverError:
@@ -413,6 +470,8 @@ class RommAPIClient: PRommAPIClient {
     ) async throws -> Data {
         let measurement = PerformanceMeasurement(operation: "\(method.rawValue) \(path) [multipart]")
         logger.logNetworkRequest(method: method.rawValue, url: path)
+        let requestGeneration = authenticationSessionManager
+            .captureRequestGeneration()
 
         let url = try buildURL(path: path)
 
@@ -426,6 +485,18 @@ class RommAPIClient: PRommAPIClient {
         request.timeoutInterval = 60.0
         additionalHeaders?.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         request.httpBody = formData
+        guard let requestScope = try captureAuthenticationRequestScope(
+            for: request,
+            ifCurrent: requestGeneration
+        ) else {
+            return try await multipartRequest(
+                path: path,
+                method: method,
+                boundary: boundary,
+                formData: formData,
+                additionalHeaders: additionalHeaders
+            )
+        }
 
         do {
             let (data, response) = try await urlSession.data(for: request)
@@ -443,7 +514,10 @@ class RommAPIClient: PRommAPIClient {
                 return data
             case .unauthenticated:
                 logger.warning("Authentication failed for multipart request")
-                notifySessionExpired()
+                notifySessionExpired(
+                    ifCurrent: requestScope,
+                    response: httpResponse
+                )
                 throw APIClientError.authenticationRequired
             case .forbidden:
                 let msg = String(data: data, encoding: .utf8) ?? "Forbidden"
@@ -490,6 +564,8 @@ class RommAPIClient: PRommAPIClient {
     }
 
     func getBinary(_ path: String) async throws -> Data {
+        let requestGeneration = authenticationSessionManager
+            .captureRequestGeneration()
         let url = try buildURL(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = HTTPMethod.get.rawValue
@@ -498,13 +574,19 @@ class RommAPIClient: PRommAPIClient {
         }
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 30.0
+        guard let requestScope = try captureAuthenticationRequestScope(
+            for: request,
+            ifCurrent: requestGeneration
+        ) else {
+            return try await getBinary(path)
+        }
         let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw APIClientError.networkError(URLError(.badServerResponse)) }
         switch APIResponseStatusPolicy.classify(http.statusCode) {
         case .success:
             return data
         case .unauthenticated:
-            notifySessionExpired()
+            notifySessionExpired(ifCurrent: requestScope, response: http)
             throw APIClientError.authenticationRequired
         case .forbidden, .clientError, .serverError, .unexpected:
             let msg = String(data: data.prefix(500), encoding: .utf8) ?? "Error"
@@ -580,6 +662,58 @@ class RommAPIClient: PRommAPIClient {
     func authorizationHeader(for url: URL) throws -> String? {
         guard isSameOriginAsServer(url) else { return nil }
         return try makeAuthHeader()
+    }
+
+    func captureAuthenticationRequestScope(
+        for request: URLRequest,
+        ifCurrent generation: Int? = nil,
+        expiresSessionOnUnauthorized: Bool = true,
+        includeConfiguredSession: Bool = false
+    ) throws -> RommAuthenticationRequestScope? {
+        let hasAuthorizationHeader =
+            request.value(forHTTPHeaderField: "Authorization") != nil
+        let isConfiguredSameOriginRequest = request.url.map {
+            isSameOriginAsServer($0)
+        } == true
+        let isAuthenticated = expiresSessionOnUnauthorized
+            && (hasAuthorizationHeader
+                || (includeConfiguredSession
+                    && isConfiguredSameOriginRequest
+                    && hasConfiguredAuthentication))
+        if let generation {
+            let requestScope = authenticationSessionManager.captureRequestScope(
+                ifCurrent: generation,
+                isAuthenticated: isAuthenticated
+            )
+            if requestScope == nil,
+               isAuthenticated,
+               !authenticationSessionManager.authenticationRequestsAreAvailable {
+                throw APIClientError.authenticationRequired
+            }
+            return requestScope
+        }
+        return authenticationSessionManager.captureRequestScope(
+            isAuthenticated: isAuthenticated
+        )
+    }
+
+    func captureAuthenticationRequestGeneration() -> Int {
+        authenticationSessionManager.captureRequestGeneration()
+    }
+
+    private var authenticationSessionManager: RommImageSessionManager {
+        injectedAuthenticationSessionManager ?? .shared
+    }
+
+    private var hasConfiguredAuthentication: Bool {
+        guard tokenProvider.getServerURL() != nil else { return false }
+        switch tokenProvider.getAuthMethod() {
+        case .clientToken:
+            return tokenProvider.getClientToken() != nil
+        case .classic:
+            return tokenProvider.getUsername() != nil
+                && tokenProvider.getPassword() != nil
+        }
     }
 
     func isSameOriginAsServer(_ url: URL) -> Bool {
