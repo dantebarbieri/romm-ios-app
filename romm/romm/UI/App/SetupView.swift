@@ -659,14 +659,14 @@ struct SetupView: View {
         let service = ClientTokenAuthService()
         do {
             let tokenInfo = try await service.validateToken(serverURL: serverURL, token: clientTokenInput)
-            try service.saveToken(clientTokenInput, info: tokenInfo)
             let setupRepo = SetupRepository()
             if let version = detectedServerVersion {
                 appViewModel.saveServerVersion(version)
             }
             try setupRepo.saveClientTokenSetup(
                 serverURL: serverURL,
-                tokenName: tokenInfo.name,
+                token: clientTokenInput,
+                tokenInfo: tokenInfo,
                 version: detectedServerVersion ?? "unknown",
                 allowIncompatibleVersionLogin: didAcceptIncompatibleVersion
             )
@@ -689,14 +689,14 @@ struct SetupView: View {
         let service = ClientTokenAuthService()
         do {
             let (token, tokenInfo) = try await service.exchangeCode(serverURL: serverURL, code: code)
-            try service.saveToken(token, info: tokenInfo)
             let setupRepo = SetupRepository()
             if let version = detectedServerVersion {
                 appViewModel.saveServerVersion(version)
             }
             try setupRepo.saveClientTokenSetup(
                 serverURL: serverURL,
-                tokenName: tokenInfo.name,
+                token: token,
+                tokenInfo: tokenInfo,
                 version: detectedServerVersion ?? "unknown",
                 allowIncompatibleVersionLogin: didAcceptIncompatibleVersion
             )

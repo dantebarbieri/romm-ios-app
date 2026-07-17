@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 import Kingfisher
 import Testing
 @testable import romm
@@ -248,16 +249,16 @@ struct RomMAPICompatibilityTests {
     }
 
     @Test func privateImageRedirectsRemainSameOrigin() throws {
-        let client = RommAPIClient(
-            tokenProvider: MockTokenProvider(
-                serverURL: "https://romm.example",
-                username: "user",
-                password: "pass"
-            )
+        let manager = imageSessionManager()
+        let session = manager.session(for: imageAuthScope("account-a"))
+        let initiatingURL = try #require(
+            URL(string: "https://romm.example/api/screenshots/4/content")
         )
+        let origin = try #require(RommImageRequestOrigin(url: initiatingURL))
         let handler = RommImageRedirectHandler(
-            apiClient: client,
-            authorizationHeader: "TestAuthorization"
+            origin: origin,
+            authorizationHeader: "TestAuthorization",
+            session: session
         )
         let sameOriginURL = try #require(
             URL(string: "https://romm.example:443/api/screenshots/4/content")
@@ -275,6 +276,46 @@ struct RomMAPICompatibilityTests {
                 == "TestAuthorization"
         )
         #expect(handler.redirectedRequest(URLRequest(url: crossOriginURL)) == nil)
+    }
+
+    @Test func invalidatedPrivateImageRedirectCannotRetainOldCredentials() throws {
+        let tokenProvider = MockTokenProvider(
+            serverURL: "https://old-romm.example",
+            username: "user",
+            password: "old-password"
+        )
+        let client = RommAPIClient(tokenProvider: tokenProvider)
+        let manager = RommImageSessionManager(apiClient: client)
+        let initiatingURL = try #require(
+            URL(string: "https://old-romm.example/api/screenshots/4/content")
+        )
+        let scope = try #require(
+            RommImageAuthScope(
+                url: initiatingURL,
+                authorizationHeader: "OldAuthorization"
+            )
+        )
+        let session = manager.session(for: scope)
+        let handler = RommImageRedirectHandler(
+            origin: try #require(RommImageRequestOrigin(url: initiatingURL)),
+            authorizationHeader: "OldAuthorization",
+            session: session
+        )
+        let oldOriginRedirect = URLRequest(
+            url: try #require(URL(string: "https://old-romm.example/redirected"))
+        )
+        let newOriginRedirect = URLRequest(
+            url: try #require(URL(string: "https://new-romm.example/redirected"))
+        )
+
+        #expect(handler.redirectedRequest(oldOriginRedirect) != nil)
+        #expect(handler.redirectedRequest(newOriginRedirect) == nil)
+
+        tokenProvider.mockServerURL = "https://new-romm.example"
+        manager.authenticationScopeDidChange()
+
+        #expect(handler.redirectedRequest(oldOriginRedirect) == nil)
+        #expect(handler.redirectedRequest(newOriginRedirect) == nil)
     }
 
     @Test func unsafeImageURLsAreRejected() {
@@ -623,6 +664,133 @@ struct RomMAPICompatibilityTests {
 
         #expect(requestScope == nil)
         #expect(loginProbeScope != nil)
+        #expect(!manager.authenticationRequestsAreAvailable)
+    }
+
+    @Test func nestedAuthenticationMutationReactivatesOnlyAfterOuterCommit() {
+        let manager = imageSessionManager()
+        var innerMutationCompleted = false
+
+        manager.performAuthenticationMutation {
+            #expect(!manager.authenticationRequestsAreAvailable)
+            manager.performAuthenticationMutation {
+                #expect(!manager.authenticationRequestsAreAvailable)
+                innerMutationCompleted = true
+            }
+            #expect(innerMutationCompleted)
+            #expect(!manager.authenticationRequestsAreAvailable)
+        }
+
+        #expect(manager.authenticationRequestsAreAvailable)
+    }
+
+    @Test func failedAuthenticationMutationRemainsInvalidated() {
+        enum ExpectedError: Error {
+            case failed
+        }
+        let manager = imageSessionManager()
+
+        #expect(throws: ExpectedError.self) {
+            try manager.performAuthenticationMutation {
+                throw ExpectedError.failed
+            }
+        }
+
+        #expect(!manager.authenticationRequestsAreAvailable)
+    }
+
+    @Test func clientTokenSetupCommitIsAtomicForAuthenticatedRequests() throws {
+        let suiteName = "RomMAPICompatibilityTests.\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = imageSessionManager()
+        let keychain = BlockingKeychainService()
+        let tokenService = ClientTokenAuthService(
+            keychainService: keychain,
+            sessionManager: manager
+        )
+        let repository = SetupRepository(
+            sessionManager: manager,
+            clientTokenAuthService: tokenService,
+            userDefaults: userDefaults
+        )
+        try repository.saveSetupConfiguration(
+            SetupConfiguration(
+                serverURL: "https://old-romm.example",
+                username: "old-user",
+                password: "old-password",
+                token: "old-token",
+                refreshToken: nil,
+                setupDate: Date(),
+                version: "4.9.2"
+            )
+        )
+        try repository.saveAuthMethod(.classic)
+        keychain.blockNextTokenSave()
+
+        let commit = ClientTokenSetupCommitAction(repository: repository)
+        DispatchQueue.global().async {
+            commit.run()
+        }
+        #expect(keychain.waitUntilTokenIsStored())
+
+        let acquisition = AuthenticationAcquisitionAction(
+            manager: manager,
+            repository: repository,
+            tokenService: tokenService
+        )
+        DispatchQueue.global().async {
+            acquisition.run()
+        }
+
+        #expect(!acquisition.waitForCompletion(timeout: 0.05))
+        #expect(
+            repository.getSetupConfiguration()?.serverURL
+                == "https://old-romm.example"
+        )
+        #expect(tokenService.getToken() == "new-client-token")
+
+        keychain.resumeTokenSave()
+
+        #expect(commit.waitForCompletion())
+        #expect(commit.error == nil)
+        #expect(acquisition.waitForCompletion())
+        #expect(acquisition.snapshot?.serverURL == "https://new-romm.example")
+        #expect(acquisition.snapshot?.authMethod == .clientToken)
+        #expect(acquisition.snapshot?.clientToken == "new-client-token")
+        #expect(acquisition.snapshot?.requestWasAcquired == true)
+    }
+
+    @Test func failedClientTokenSetupLeavesAuthenticationInvalidated() throws {
+        let suiteName = "RomMAPICompatibilityTests.\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = imageSessionManager()
+        let keychain = FailingClientTokenKeychainService()
+        let tokenService = ClientTokenAuthService(
+            keychainService: keychain,
+            sessionManager: manager
+        )
+        let repository = SetupRepository(
+            sessionManager: manager,
+            clientTokenAuthService: tokenService,
+            userDefaults: userDefaults
+        )
+
+        #expect(throws: ClientTokenError.self) {
+            try repository.saveClientTokenSetup(
+                serverURL: "https://new-romm.example",
+                token: "new-client-token",
+                tokenInfo: testClientTokenInfo(),
+                version: "5.0.1",
+                allowIncompatibleVersionLogin: false
+            )
+        }
+
+        #expect(tokenService.getToken() == nil)
+        #expect(repository.getSetupConfiguration() == nil)
         #expect(!manager.authenticationRequestsAreAvailable)
     }
 
@@ -1084,6 +1252,15 @@ struct RomMAPICompatibilityTests {
         return scope
     }
 
+    private func testClientTokenInfo() -> ClientTokenInfo {
+        ClientTokenInfo(
+            tokenId: 42,
+            name: "New Token",
+            scopes: ["roms.read"],
+            expiresAt: nil
+        )
+    }
+
     private func statusResponseClient(
         notificationCenter: NotificationCenter
     ) -> RommAPIClient {
@@ -1183,6 +1360,179 @@ private final class NotificationCounter: @unchecked Sendable {
         lock.lock()
         count += 1
         lock.unlock()
+    }
+}
+
+private final class BlockingKeychainService: PKeychainService, @unchecked Sendable {
+    private let lock = NSLock()
+    private let tokenStored = DispatchSemaphore(value: 0)
+    private let resumeSave = DispatchSemaphore(value: 0)
+    private var values: [String: String] = [:]
+    private var shouldBlockTokenSave = false
+
+    func blockNextTokenSave() {
+        lock.lock()
+        shouldBlockTokenSave = true
+        lock.unlock()
+    }
+
+    func save(key: String, value: String) throws {
+        lock.lock()
+        values[key] = value
+        let shouldBlock = shouldBlockTokenSave
+            && key == ClientTokenAuthService.tokenKeychainKey
+        if shouldBlock {
+            shouldBlockTokenSave = false
+        }
+        lock.unlock()
+
+        if shouldBlock {
+            tokenStored.signal()
+            resumeSave.wait()
+        }
+    }
+
+    func get(key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key]
+    }
+
+    func delete(key: String) throws {
+        lock.lock()
+        values.removeValue(forKey: key)
+        lock.unlock()
+    }
+
+    func waitUntilTokenIsStored() -> Bool {
+        tokenStored.wait(timeout: .now() + 1) == .success
+    }
+
+    func resumeTokenSave() {
+        resumeSave.signal()
+    }
+}
+
+private final class FailingClientTokenKeychainService: PKeychainService {
+    private var values: [String: String] = [:]
+
+    func save(key: String, value: String) throws {
+        if key == ClientTokenAuthService.tokenInfoKeychainKey {
+            throw ClientTokenError.tokenSaveFailed
+        }
+        values[key] = value
+    }
+
+    func get(key: String) -> String? {
+        values[key]
+    }
+
+    func delete(key: String) throws {
+        values.removeValue(forKey: key)
+    }
+}
+
+private final class ClientTokenSetupCommitAction: @unchecked Sendable {
+    private let repository: SetupRepository
+    private let completion = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var storedError: Error?
+
+    init(repository: SetupRepository) {
+        self.repository = repository
+    }
+
+    var error: Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedError
+    }
+
+    func run() {
+        defer { completion.signal() }
+        do {
+            try repository.saveClientTokenSetup(
+                serverURL: "https://new-romm.example",
+                token: "new-client-token",
+                tokenInfo: ClientTokenInfo(
+                    tokenId: 42,
+                    name: "New Token",
+                    scopes: ["roms.read"],
+                    expiresAt: nil
+                ),
+                version: "5.0.1",
+                allowIncompatibleVersionLogin: false
+            )
+        } catch {
+            lock.lock()
+            storedError = error
+            lock.unlock()
+        }
+    }
+
+    func waitForCompletion() -> Bool {
+        completion.wait(timeout: .now() + 1) == .success
+    }
+}
+
+private struct AuthenticationSnapshot {
+    let serverURL: String?
+    let authMethod: AuthMethod
+    let clientToken: String?
+    let requestWasAcquired: Bool
+}
+
+private final class AuthenticationAcquisitionAction: @unchecked Sendable {
+    private let manager: RommImageSessionManager
+    private let repository: SetupRepository
+    private let tokenService: ClientTokenAuthService
+    private let completion = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var storedSnapshot: AuthenticationSnapshot?
+
+    init(
+        manager: RommImageSessionManager,
+        repository: SetupRepository,
+        tokenService: ClientTokenAuthService
+    ) {
+        self.manager = manager
+        self.repository = repository
+        self.tokenService = tokenService
+    }
+
+    var snapshot: AuthenticationSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedSnapshot
+    }
+
+    func run() {
+        while true {
+            let generation = manager.captureRequestGeneration()
+            let serverURL = repository.getSetupConfiguration()?.serverURL
+            let authMethod = repository.getAuthMethod()
+            let clientToken = tokenService.getToken()
+            guard manager.captureRequestScope(
+                ifCurrent: generation,
+                isAuthenticated: true
+            ) != nil else {
+                continue
+            }
+            lock.lock()
+            storedSnapshot = AuthenticationSnapshot(
+                serverURL: serverURL,
+                authMethod: authMethod,
+                clientToken: clientToken,
+                requestWasAcquired: true
+            )
+            lock.unlock()
+            completion.signal()
+            return
+        }
+    }
+
+    func waitForCompletion(timeout: TimeInterval = 1) -> Bool {
+        completion.wait(timeout: .now() + timeout) == .success
     }
 }
 

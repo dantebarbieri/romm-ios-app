@@ -34,7 +34,8 @@ struct RommImageRequest: Equatable {
                 .cacheOriginalImage
             ]
         case .romm:
-            guard let authScope else {
+            guard let authScope,
+                  let origin = RommImageRequestOrigin(url: url) else {
                 assertionFailure("RomM image requests require an authentication scope")
                 return []
             }
@@ -44,8 +45,10 @@ struct RommImageRequest: Equatable {
                 .targetCache(session.cache),
                 .cacheMemoryOnly,
                 .redirectHandler(
-                    sessionManager.redirectHandler(
-                        authorizationHeader: authorizationHeader
+                    RommImageRedirectHandler(
+                        origin: origin,
+                        authorizationHeader: authorizationHeader,
+                        session: session
                     )
                 )
             ]

@@ -51,12 +51,17 @@ class ClientTokenAuthService {
 
     private let logger = Logger.auth
     private let keychainService: PKeychainService
+    private let sessionManager: RommImageSessionManager
 
     static let tokenKeychainKey = "romm.clientToken"
     static let tokenInfoKeychainKey = "romm.clientTokenInfo"
 
-    init(keychainService: PKeychainService = KeychainService.setup) {
+    init(
+        keychainService: PKeychainService = KeychainService.setup,
+        sessionManager: RommImageSessionManager = .shared
+    ) {
         self.keychainService = keychainService
+        self.sessionManager = sessionManager
     }
 }
 
@@ -294,7 +299,17 @@ extension ClientTokenAuthService {
 
     /// Saves the client token string and its info to the Keychain.
     func saveToken(_ token: String, info: ClientTokenInfo) throws {
-        RommImageSessionManager.shared.reset()
+        try sessionManager.performAuthenticationMutation {
+            do {
+                try saveTokenStorage(token, info: info)
+            } catch {
+                clearTokenStorage()
+                throw error
+            }
+        }
+    }
+
+    func saveTokenStorage(_ token: String, info: ClientTokenInfo) throws {
         do {
             try keychainService.save(key: Self.tokenKeychainKey, value: token)
         } catch {
@@ -314,9 +329,7 @@ extension ClientTokenAuthService {
             logger.error("Failed to save client token info to Keychain: \(error.localizedDescription)")
             throw ClientTokenError.tokenSaveFailed
         }
-
         logger.info("Client token and info saved to Keychain")
-        RommImageSessionManager.shared.authenticationScopeDidChange()
     }
 
     /// Reads the stored client token string from the Keychain.
@@ -335,7 +348,11 @@ extension ClientTokenAuthService {
 
     /// Deletes both the token and token info from the Keychain.
     func clearToken() {
-        RommImageSessionManager.shared.reset()
+        sessionManager.reset()
+        clearTokenStorage()
+    }
+
+    func clearTokenStorage() {
         try? keychainService.delete(key: Self.tokenKeychainKey)
         try? keychainService.delete(key: Self.tokenInfoKeychainKey)
         logger.info("Client token cleared from Keychain")

@@ -83,7 +83,13 @@ protocol PSetupRepository {
     func saveAuthMethod(_ method: AuthMethod) throws
 
     // Client Token Methods
-    func saveClientTokenSetup(serverURL: String, tokenName: String, version: String, allowIncompatibleVersionLogin: Bool) throws
+    func saveClientTokenSetup(
+        serverURL: String,
+        token: String,
+        tokenInfo: ClientTokenInfo,
+        version: String,
+        allowIncompatibleVersionLogin: Bool
+    ) throws
     func clearClientTokenData() throws
 }
 
@@ -92,16 +98,36 @@ class SetupRepository: PSetupRepository {
     
     // MARK: - Properties
     private let logger = Logger.data
+    private let sessionManager: RommImageSessionManager
+    private let clientTokenAuthService: ClientTokenAuthService
+    private let userDefaults: UserDefaults
     
     // MARK: - Constants
     private let userDefaultsPrefix = "setup_"
     
     // UserDefaults Keys
     private let setupConfigurationKey = "setup_configuration_json"
+
+    init(
+        sessionManager: RommImageSessionManager = .shared,
+        clientTokenAuthService: ClientTokenAuthService? = nil,
+        userDefaults: UserDefaults = .standard
+    ) {
+        self.sessionManager = sessionManager
+        self.clientTokenAuthService = clientTokenAuthService
+            ?? ClientTokenAuthService(sessionManager: sessionManager)
+        self.userDefaults = userDefaults
+    }
     
     // MARK: - Public Methods
     
     func saveSetupConfiguration(_ config: SetupConfiguration) throws {
+        try sessionManager.performAuthenticationMutation {
+            try saveSetupConfigurationStorage(config)
+        }
+    }
+
+    private func saveSetupConfigurationStorage(_ config: SetupConfiguration) throws {
         logger.info("Saving setup configuration as JSON...")
         logger.debug("Server URL: \(config.serverURL)")
         logger.debug("Username: \(config.username)")
@@ -111,18 +137,14 @@ class SetupRepository: PSetupRepository {
         logger.debug("Has Token: \(config.token != nil)")
         logger.debug("Has Refresh Token: \(config.refreshToken != nil)")
         logger.debug("Allow Incompatible Version Login: \(config.allowIncompatibleVersionLogin)")
-        RommImageSessionManager.shared.reset()
-        
         do {
             let jsonData = try JSONEncoder().encode(config)
             let jsonString = String(data: jsonData, encoding: .utf8) ?? ""
             
-            UserDefaults.standard.set(jsonString, forKey: setupConfigurationKey)
+            userDefaults.set(jsonString, forKey: setupConfigurationKey)
             
             logger.debug("JSON data size: \(jsonData.count) bytes")
             logger.info("Setup configuration saved as JSON successfully")
-            RommImageSessionManager.shared.authenticationScopeDidChange()
-            
         } catch {
             logger.error("Failed to encode configuration as JSON: \(error)")
             throw SetupRepositoryError.invalidData
@@ -132,7 +154,7 @@ class SetupRepository: PSetupRepository {
     func getSetupConfiguration() -> SetupConfiguration? {
         logger.debug("Reading setup configuration from JSON...")
         
-        guard let jsonString = UserDefaults.standard.string(forKey: setupConfigurationKey),
+        guard let jsonString = userDefaults.string(forKey: setupConfigurationKey),
               !jsonString.isEmpty else {
             logger.warning("No setup configuration JSON found")
             return nil
@@ -176,7 +198,7 @@ class SetupRepository: PSetupRepository {
         if getAuthMethod() == .clientToken {
             try clearClientTokenData()
         }
-        RommImageSessionManager.shared.reset()
+        sessionManager.reset()
         logger.info("Setup configuration cleared")
     }
     
@@ -249,8 +271,11 @@ class SetupRepository: PSetupRepository {
                 allowIncompatibleVersionLogin: allowIncompatibleVersionLogin
             )
 
-            // Save to storage
-            try saveSetupConfiguration(setupConfig)
+            // Make the server, credentials, and auth method visible together.
+            try sessionManager.performAuthenticationMutation {
+                try saveSetupConfigurationStorage(setupConfig)
+                saveAuthMethodStorage(.classic)
+            }
 
             logger.info("Configuration validated and saved successfully")
             connectionLogger.finishConnection(success: true)
@@ -435,7 +460,7 @@ class SetupRepository: PSetupRepository {
     func getAuthMethod() -> AuthMethod {
         logger.debug("📖 Reading auth method...")
         
-        guard let methodString = UserDefaults.standard.string(forKey: authMethodKey),
+        guard let methodString = userDefaults.string(forKey: authMethodKey),
               let method = AuthMethod(rawValue: methodString) else {
             logger.debug("No auth method found, defaulting to classic")
             return .classic
@@ -446,20 +471,30 @@ class SetupRepository: PSetupRepository {
     }
     
     func saveAuthMethod(_ method: AuthMethod) throws {
+        sessionManager.performAuthenticationMutation {
+            saveAuthMethodStorage(method)
+        }
+    }
+
+    private func saveAuthMethodStorage(_ method: AuthMethod) {
         logger.info("💾 Saving auth method: \(method.displayName)")
-        RommImageSessionManager.shared.reset()
-        UserDefaults.standard.set(method.rawValue, forKey: authMethodKey)
-        RommImageSessionManager.shared.authenticationScopeDidChange()
+        userDefaults.set(method.rawValue, forKey: authMethodKey)
         logger.info("✅ Auth method saved")
     }
     
     // MARK: - Client Token Methods
 
-    func saveClientTokenSetup(serverURL: String, tokenName: String, version: String, allowIncompatibleVersionLogin: Bool) throws {
+    func saveClientTokenSetup(
+        serverURL: String,
+        token: String,
+        tokenInfo: ClientTokenInfo,
+        version: String,
+        allowIncompatibleVersionLogin: Bool
+    ) throws {
         logger.info("Saving client token setup configuration...")
         let setupConfig = SetupConfiguration(
             serverURL: serverURL,
-            username: tokenName.isEmpty ? "Token User" : tokenName,
+            username: tokenInfo.name.isEmpty ? "Token User" : tokenInfo.name,
             password: nil,
             token: nil,
             refreshToken: nil,
@@ -467,15 +502,24 @@ class SetupRepository: PSetupRepository {
             version: version,
             allowIncompatibleVersionLogin: allowIncompatibleVersionLogin
         )
-        try saveSetupConfiguration(setupConfig)
-        try saveAuthMethod(.clientToken)
+        try sessionManager.performAuthenticationMutation {
+            do {
+                try clientTokenAuthService.saveTokenStorage(token, info: tokenInfo)
+                try saveSetupConfigurationStorage(setupConfig)
+                saveAuthMethodStorage(.clientToken)
+            } catch {
+                clientTokenAuthService.clearTokenStorage()
+                userDefaults.removeObject(forKey: setupConfigurationKey)
+                userDefaults.removeObject(forKey: authMethodKey)
+                throw error
+            }
+        }
         logger.info("Client token setup saved")
     }
 
     func clearClientTokenData() throws {
         logger.info("Clearing client token data...")
-        let service = ClientTokenAuthService()
-        service.clearToken()
+        clientTokenAuthService.clearToken()
         logger.info("Client token data cleared")
     }
 

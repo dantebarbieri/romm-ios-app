@@ -17,6 +17,31 @@ struct RommImageAuthScope: Hashable {
     }
 }
 
+struct RommImageRequestOrigin: Equatable, Sendable {
+    private let scheme: String
+    private let host: String
+    private let port: Int
+
+    init?(url: URL) {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased(),
+              let port = RommServerURLResolver.effectivePort(for: url) else {
+            return nil
+        }
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+    }
+
+    func contains(_ url: URL) -> Bool {
+        guard let other = RommImageRequestOrigin(url: url) else {
+            return false
+        }
+        return self == other
+    }
+}
+
 struct RommAuthenticationRequestScope: Equatable, Sendable {
     fileprivate let generation: Int
     fileprivate let isAuthenticated: Bool
@@ -37,6 +62,7 @@ final class RommImageSessionManager: @unchecked Sendable {
     private var blockedSession: RommImageDownloadSession?
     private var authenticationInvalidated = false
     private var expirationNotificationPending = false
+    private var authenticationMutationInProgress = false
     private var scopeGeneration = 0
 
     init(
@@ -95,12 +121,7 @@ final class RommImageSessionManager: @unchecked Sendable {
 
     func reset() {
         lock.lock()
-        authenticationInvalidated = true
-        scopeGeneration &+= 1
-        let previousSession = activeSession
-        activeScope = nil
-        activeSession = nil
-        previousSession?.invalidate()
+        invalidateAuthenticationLocked()
         lock.unlock()
     }
 
@@ -115,6 +136,31 @@ final class RommImageSessionManager: @unchecked Sendable {
         lock.unlock()
     }
 
+    func performAuthenticationMutation<T>(
+        _ mutation: () throws -> T
+    ) rethrows -> T {
+        lock.lock()
+        if authenticationMutationInProgress {
+            defer { lock.unlock() }
+            return try mutation()
+        }
+
+        authenticationMutationInProgress = true
+        invalidateAuthenticationLocked()
+        do {
+            let result = try mutation()
+            authenticationInvalidated = false
+            scopeGeneration &+= 1
+            authenticationMutationInProgress = false
+            lock.unlock()
+            return result
+        } catch {
+            authenticationMutationInProgress = false
+            lock.unlock()
+            throw error
+        }
+    }
+
     func captureRequestScope(
         isAuthenticated: Bool
     ) -> RommAuthenticationRequestScope {
@@ -123,15 +169,6 @@ final class RommImageSessionManager: @unchecked Sendable {
         return RommAuthenticationRequestScope(
             generation: scopeGeneration,
             isAuthenticated: isAuthenticated
-        )
-    }
-
-    func redirectHandler(
-        authorizationHeader: String?
-    ) -> RommImageRedirectHandler {
-        RommImageRedirectHandler(
-            apiClient: apiClient,
-            authorizationHeader: authorizationHeader
         )
     }
 
@@ -232,6 +269,15 @@ final class RommImageSessionManager: @unchecked Sendable {
         return RommSessionExpiration(generation: scopeGeneration)
     }
 
+    private func invalidateAuthenticationLocked() {
+        authenticationInvalidated = true
+        scopeGeneration &+= 1
+        let previousSession = activeSession
+        activeScope = nil
+        activeSession = nil
+        previousSession?.invalidate()
+    }
+
     private func finishExpirationNotification() {
         lock.lock()
         expirationNotificationPending = false
@@ -282,12 +328,18 @@ final class RommImageSessionManager: @unchecked Sendable {
 }
 
 final class RommImageRedirectHandler: ImageDownloadRedirectHandler, @unchecked Sendable {
-    private let apiClient: RommAPIClient
+    private let origin: RommImageRequestOrigin
     private let authorizationHeader: String?
+    private weak var session: RommImageDownloadSession?
 
-    init(apiClient: RommAPIClient, authorizationHeader: String?) {
-        self.apiClient = apiClient
+    init(
+        origin: RommImageRequestOrigin,
+        authorizationHeader: String?,
+        session: RommImageDownloadSession
+    ) {
+        self.origin = origin
         self.authorizationHeader = authorizationHeader
+        self.session = session
     }
 
     func handleHTTPRedirection(
@@ -299,18 +351,11 @@ final class RommImageRedirectHandler: ImageDownloadRedirectHandler, @unchecked S
     }
 
     func redirectedRequest(_ request: URLRequest) -> URLRequest? {
-        guard let url = request.url,
-              apiClient.isSameOriginAsServer(url) else {
-            return nil
-        }
-        var authenticatedRequest = request
-        if let authorizationHeader {
-            authenticatedRequest.setValue(
-                authorizationHeader,
-                forHTTPHeaderField: "Authorization"
-            )
-        }
-        return authenticatedRequest
+        session?.redirectedRequestIfActive(
+            request,
+            origin: origin,
+            authorizationHeader: authorizationHeader
+        )
     }
 }
 
@@ -401,6 +446,28 @@ final class RommImageDownloadSession: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return invalidated
+    }
+
+    func redirectedRequestIfActive(
+        _ request: URLRequest,
+        origin: RommImageRequestOrigin,
+        authorizationHeader: String?
+    ) -> URLRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !invalidated,
+              let url = request.url,
+              origin.contains(url) else {
+            return nil
+        }
+        var authenticatedRequest = request
+        if let authorizationHeader {
+            authenticatedRequest.setValue(
+                authorizationHeader,
+                forHTTPHeaderField: "Authorization"
+            )
+        }
+        return authenticatedRequest
     }
 
     var isPrivateNetworkTrustConfigured: Bool {
