@@ -101,6 +101,10 @@ extension RommAPIClient {
 
     func deleteStates(ids: [Int]) async throws {
         struct Body: Codable { let states: [Int] }
-        _ = try await post("api/states/delete", body: Body(states: ids), responseType: BulkDeleteAck.self)
+        _ = try await post(
+            "api/states/delete",
+            body: Body(states: ids),
+            responseType: BulkDeleteResponse.self
+        )
     }
 }

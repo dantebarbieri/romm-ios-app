@@ -105,12 +105,50 @@ extension RommAPIClient {
 
     func deleteSaves(ids: [Int]) async throws {
         struct Body: Codable { let saves: [Int] }
-        _ = try await post("api/saves/delete", body: Body(saves: ids), responseType: BulkDeleteAck.self)
+        _ = try await post(
+            "api/saves/delete",
+            body: Body(saves: ids),
+            responseType: BulkDeleteResponse.self
+        )
     }
 }
 
 struct BulkDeleteAck: Codable {
-    let msg: String?
+    let msg: String
+}
+
+enum BulkDeleteResponse: Codable {
+    case deletedIDs([Int])
+    case acknowledgement(BulkDeleteAck)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let ids = try? container.decode([Int].self) {
+            self = .deletedIDs(ids)
+            return
+        }
+        if let acknowledgement = try? container.decode(BulkDeleteAck.self) {
+            self = .acknowledgement(acknowledgement)
+            return
+        }
+        throw DecodingError.typeMismatch(
+            BulkDeleteResponse.self,
+            .init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Expected deleted ID array or acknowledgement object"
+            )
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .deletedIDs(let ids):
+            try container.encode(ids)
+        case .acknowledgement(let acknowledgement):
+            try container.encode(acknowledgement)
+        }
+    }
 }
 
 // MARK: - Multipart File Helper

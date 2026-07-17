@@ -571,7 +571,7 @@ struct SetupView: View {
                 return ("Server is protected by Cloudflare", "This server is behind Cloudflare protection and cannot be accessed directly.")
             case .authenticationRequired:
                 return ("Authentication failed", "Invalid username or password")
-            case .invalidURL(let url):
+            case .invalidURL(let url), .disallowedURL(let url):
                 return ("Invalid URL", "The URL '\(url)' is not valid")
             case .noConfiguration:
                 return ("Configuration error", "Server configuration is missing")

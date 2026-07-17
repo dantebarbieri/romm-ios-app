@@ -103,6 +103,7 @@ enum APIClientError: LocalizedError {
     case noConfiguration
     case noCredentials
     case invalidURL(String)
+    case disallowedURL(String)
     case authenticationRequired
     case networkError(Error)
     case invalidResponse(Int, String)
@@ -117,6 +118,8 @@ enum APIClientError: LocalizedError {
             return "No authentication credentials found - please setup login"
         case .invalidURL(let url):
             return "Invalid URL: \(url)"
+        case .disallowedURL(let url):
+            return "URL is not allowed for the configured RomM server: \(url)"
         case .authenticationRequired:
             return "Authentication required - please check credentials"
         case .networkError(let error):
@@ -550,23 +553,7 @@ class RommAPIClient: PRommAPIClient {
     // MARK: - Internal Helpers
 
     func buildURL(path: String) throws -> URL {
-        let cleanPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let absoluteURL = URL(string: cleanPath), absoluteURL.scheme != nil {
-            return absoluteURL
-        }
-
-        guard let serverURL = tokenProvider.getServerURL() else {
-            logger.error("No server URL configured")
-            throw APIClientError.noConfiguration
-        }
-        let cleanServerURL = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let relativePath = cleanPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let fullURLString = "\(cleanServerURL)/\(relativePath)"
-        guard let url = URL(string: fullURLString) else {
-            logger.error("Invalid URL: \(fullURLString)")
-            throw APIClientError.invalidURL(fullURLString)
-        }
-        return url
+        try RommServerURLResolver(serverURL: tokenProvider.getServerURL()).resolve(path)
     }
 
     func makeAuthHeader() throws -> String {
@@ -599,22 +586,12 @@ class RommAPIClient: PRommAPIClient {
     }
 
     func isSameOriginAsServer(_ url: URL) -> Bool {
-        guard let serverURL = tokenProvider.getServerURL(),
-              let configuredURL = URL(string: serverURL) else {
+        do {
+            return try RommServerURLResolver(
+                serverURL: tokenProvider.getServerURL()
+            ).isSameOrigin(url)
+        } catch {
             return false
-        }
-
-        return url.scheme?.lowercased() == configuredURL.scheme?.lowercased()
-            && url.host?.lowercased() == configuredURL.host?.lowercased()
-            && effectivePort(for: url) == effectivePort(for: configuredURL)
-    }
-
-    private func effectivePort(for url: URL) -> Int? {
-        if let port = url.port { return port }
-        switch url.scheme?.lowercased() {
-        case "http": return 80
-        case "https": return 443
-        default: return nil
         }
     }
 

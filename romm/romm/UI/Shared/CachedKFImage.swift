@@ -72,6 +72,7 @@ private struct CachedKFImageLoader<Content: View, Placeholder: View>: View {
             .transition(.fade(0.2))
         ]
         if let authHeader = try? RommAPIClient.shared.authorizationHeader(for: url) {
+            options.append(.downloader(RommImageDownloader.shared.downloader))
             options.append(.requestModifier(AnyModifier { request in
                 var authenticatedRequest = request
                 authenticatedRequest.setValue(authHeader, forHTTPHeaderField: "Authorization")

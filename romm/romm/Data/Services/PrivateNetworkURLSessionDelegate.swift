@@ -8,23 +8,9 @@
 import Foundation
 import os
 
-/// URLSessionDelegate that accepts HTTP connections and self-signed certificates
-/// ONLY for private IP addresses (Tailscale VPN and local networks).
-/// Public servers still require valid HTTPS certificates.
-class PrivateNetworkURLSessionDelegate: NSObject, URLSessionDelegate {
-
-    private let logger = Logger.network
-
-    // MARK: - Private IP Range Detection
-
-    /// Checks if the given host is a private IP address
-    /// Supports:
-    /// - Tailscale: 100.64.0.0/10 (CGNAT range used by Tailscale)
-    /// - Private Class A: 10.0.0.0/8
-    /// - Private Class B: 172.16.0.0/12
-    /// - Private Class C: 192.168.0.0/16
-    /// - Localhost: 127.0.0.0/8
-    private func isPrivateIPAddress(_ host: String) -> Bool {
+struct PrivateNetworkTrustPolicy {
+    static func allowsSelfSignedCertificate(for host: String) -> Bool {
+        let host = host.lowercased()
         // Handle localhost special cases
         if host == "localhost" || host == "::1" {
             return true
@@ -46,15 +32,46 @@ class PrivateNetworkURLSessionDelegate: NSObject, URLSessionDelegate {
         return false
     }
 
-    /// Parses IPv4 address string into components
-    private func parseIPv4(_ host: String) -> [UInt8]? {
-        let components = host.split(separator: ".").compactMap { UInt8($0) }
-        guard components.count == 4 else { return nil }
-        return components
+    static func description(for host: String) -> String {
+        let host = host.lowercased()
+        if host == "localhost" || host == "::1" || host.hasPrefix("127.") {
+            return "Localhost"
+        }
+
+        if let components = parseIPv4(host) {
+            let octet1 = components[0]
+            let octet2 = components[1]
+
+            if octet1 == 10 {
+                return "Private Class A (10.x.x.x)"
+            } else if octet1 == 100 && octet2 >= 64 && octet2 <= 127 {
+                return "Tailscale VPN (100.x.x.x)"
+            } else if octet1 == 172 && octet2 >= 16 && octet2 <= 31 {
+                return "Private Class B (172.x.x.x)"
+            } else if octet1 == 192 && octet2 == 168 {
+                return "Private Class C (192.168.x.x)"
+            }
+        }
+
+        if host.contains(":") {
+            if host.hasPrefix("fe80:") {
+                return "IPv6 Link-Local"
+            } else if host.hasPrefix("fc") || host.hasPrefix("fd") {
+                return "IPv6 Unique Local"
+            }
+        }
+
+        return "Public IP/Domain"
     }
 
-    /// Checks if IPv4 address is in private ranges
-    private func isPrivateIPv4(_ components: [UInt8]) -> Bool {
+    private static func parseIPv4(_ host: String) -> [UInt8]? {
+        let components = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4 else { return nil }
+        let octets = components.compactMap { UInt8($0) }
+        return octets.count == 4 ? octets : nil
+    }
+
+    private static func isPrivateIPv4(_ components: [UInt8]) -> Bool {
         guard components.count == 4 else { return false }
 
         let octet1 = components[0]
@@ -89,40 +106,11 @@ class PrivateNetworkURLSessionDelegate: NSObject, URLSessionDelegate {
 
         return false
     }
+}
 
-    /// Gets a human-readable description of the IP type
-    private func getIPTypeDescription(_ host: String) -> String {
-        if host == "localhost" || host == "::1" || host.hasPrefix("127.") {
-            return "Localhost"
-        }
-
-        if let components = parseIPv4(host) {
-            let octet1 = components[0]
-            let octet2 = components[1]
-
-            if octet1 == 10 {
-                return "Private Class A (10.x.x.x)"
-            } else if octet1 == 100 && octet2 >= 64 && octet2 <= 127 {
-                return "Tailscale VPN (100.x.x.x)"
-            } else if octet1 == 172 && octet2 >= 16 && octet2 <= 31 {
-                return "Private Class B (172.x.x.x)"
-            } else if octet1 == 192 && octet2 == 168 {
-                return "Private Class C (192.168.x.x)"
-            }
-        }
-
-        if host.contains(":") {
-            if host.hasPrefix("fe80:") {
-                return "IPv6 Link-Local"
-            } else if host.hasPrefix("fc") || host.hasPrefix("fd") {
-                return "IPv6 Unique Local"
-            }
-        }
-
-        return "Public IP/Domain"
-    }
-
-    // MARK: - URLSessionDelegate
+/// Accepts self-signed certificates only for private-network hosts.
+class PrivateNetworkURLSessionDelegate: NSObject, URLSessionDelegate {
+    private let logger = Logger.network
 
     func urlSession(
         _ session: URLSession,
@@ -140,8 +128,8 @@ class PrivateNetworkURLSessionDelegate: NSObject, URLSessionDelegate {
         }
 
         // Check if this is a private IP address
-        let isPrivate = isPrivateIPAddress(host)
-        let ipType = getIPTypeDescription(host)
+        let isPrivate = PrivateNetworkTrustPolicy.allowsSelfSignedCertificate(for: host)
+        let ipType = PrivateNetworkTrustPolicy.description(for: host)
 
         if isPrivate {
             // Private IP: Accept self-signed certificates and HTTP

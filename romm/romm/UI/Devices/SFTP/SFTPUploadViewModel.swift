@@ -572,7 +572,7 @@ class SFTPUploadViewModel {
             return .authenticationFailed
         case .noConfiguration:
             return .networkError("No server URL configured")
-        case .invalidURL(let url):
+        case .invalidURL(let url), .disallowedURL(let url):
             return .networkError("Invalid download URL: \(url)")
         case .networkError(let networkError):
             return .networkError(networkError.localizedDescription)
