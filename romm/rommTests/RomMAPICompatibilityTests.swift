@@ -924,7 +924,7 @@ struct RomMAPICompatibilityTests {
         #expect(!manager.authenticationRequestsAreAvailable)
     }
 
-    @Test func clientTokenRollbackFailureIsDistinctAndRemainsInvalidated() throws {
+    @Test func failedClientTokenRestoreFailsClosedAcrossRestart() throws {
         let suiteName = "RomMAPICompatibilityTests.\(UUID().uuidString)"
         let userDefaults = try #require(UserDefaults(suiteName: suiteName))
         defer { userDefaults.removePersistentDomain(forName: suiteName) }
@@ -940,6 +940,81 @@ struct RomMAPICompatibilityTests {
             clientTokenAuthService: tokenService,
             userDefaults: userDefaults
         )
+        try repository.saveClientTokenSetup(
+            serverURL: "https://old-romm.example",
+            token: "old-client-token",
+            tokenInfo: ClientTokenInfo(
+                tokenId: 7,
+                name: "Previous Token",
+                scopes: ["roms.read"],
+                expiresAt: nil
+            ),
+            version: "4.9.2",
+            allowIncompatibleVersionLogin: false
+        )
+        keychain.failNextSave(
+            for: ClientTokenAuthService.tokenInfoKeychainKey
+        )
+        keychain.failSave(
+            for: ClientTokenAuthService.tokenKeychainKey,
+            afterAdditionalAttempts: 1
+        )
+
+        do {
+            try repository.saveClientTokenSetup(
+                serverURL: "https://new-romm.example",
+                token: "new-client-token",
+                tokenInfo: testClientTokenInfo(),
+                version: "5.0.1",
+                allowIncompatibleVersionLogin: false
+            )
+            Issue.record("Expected a distinct authentication rollback failure")
+        } catch SetupRepositoryError.authenticationRollbackFailed(_, _) {
+        } catch {
+            Issue.record("Expected authentication rollback failure, got \(error)")
+        }
+
+        #expect(repository.getSetupConfiguration() == nil)
+        #expect(userDefaults.string(forKey: "setup_auth_method") == nil)
+        #expect(tokenService.getToken() == nil)
+        #expect(tokenService.getTokenInfo() == nil)
+        #expect(!manager.authenticationRequestsAreAvailable)
+        #expect(
+            !restartAcceptsAuthentication(
+                userDefaults: userDefaults,
+                keychainService: keychain
+            )
+        )
+    }
+
+    @Test func failedClassicTransitionRestoreFailsClosedAcrossRestart() throws {
+        let suiteName = "RomMAPICompatibilityTests.\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = imageSessionManager()
+        let keychain = FaultInjectingKeychainService()
+        let tokenService = ClientTokenAuthService(
+            keychainService: keychain,
+            sessionManager: manager
+        )
+        let repository = SetupRepository(
+            sessionManager: manager,
+            clientTokenAuthService: tokenService,
+            userDefaults: userDefaults
+        )
+        try repository.saveSetupConfiguration(
+            SetupConfiguration(
+                serverURL: "https://classic-romm.example",
+                username: "classic-user",
+                password: "classic-password",
+                token: "classic-access-token",
+                refreshToken: nil,
+                setupDate: Date(),
+                version: "4.9.2"
+            )
+        )
+        try repository.saveAuthMethod(.classic)
         keychain.failNextSave(
             for: ClientTokenAuthService.tokenInfoKeychainKey
         )
@@ -961,15 +1036,80 @@ struct RomMAPICompatibilityTests {
             Issue.record("Expected authentication rollback failure, got \(error)")
         }
 
+        #expect(repository.getSetupConfiguration() == nil)
+        #expect(userDefaults.string(forKey: "setup_auth_method") == nil)
+        #expect(tokenService.getToken() == nil)
+        #expect(tokenService.getTokenInfo() == nil)
+        #expect(!manager.authenticationRequestsAreAvailable)
+        #expect(
+            !restartAcceptsAuthentication(
+                userDefaults: userDefaults,
+                keychainService: keychain
+            )
+        )
+    }
+
+    @Test func emptyStateRollbackFailureFailsClosedAcrossRestart() throws {
+        let suiteName = "RomMAPICompatibilityTests.\(UUID().uuidString)"
+        let userDefaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+
+        let manager = imageSessionManager()
+        let keychain = FaultInjectingKeychainService()
+        let tokenService = ClientTokenAuthService(
+            keychainService: keychain,
+            sessionManager: manager
+        )
+        let repository = SetupRepository(
+            sessionManager: manager,
+            clientTokenAuthService: tokenService,
+            userDefaults: userDefaults
+        )
+        keychain.failNextSave(
+            for: ClientTokenAuthService.tokenInfoKeychainKey
+        )
+        keychain.failNextDelete(
+            for: ClientTokenAuthService.tokenKeychainKey
+        )
+        keychain.failDelete(
+            for: ClientTokenAuthService.tokenKeychainKey,
+            afterAdditionalAttempts: 1
+        )
+
+        do {
+            try repository.saveClientTokenSetup(
+                serverURL: "https://new-romm.example",
+                token: "new-client-token",
+                tokenInfo: testClientTokenInfo(),
+                version: "5.0.1",
+                allowIncompatibleVersionLogin: false
+            )
+            Issue.record("Expected a distinct authentication rollback failure")
+        } catch SetupRepositoryError.authenticationRollbackFailed(
+            _,
+            let rollback
+        ) {
+            #expect(rollback.contains("fail-closed cleanup"))
+        } catch {
+            Issue.record("Expected authentication rollback failure, got \(error)")
+        }
+
         #expect(tokenService.getToken() == "new-client-token")
         #expect(tokenService.getTokenInfo() == nil)
         #expect(repository.getSetupConfiguration() == nil)
+        #expect(userDefaults.string(forKey: "setup_auth_method") == nil)
         #expect(!manager.authenticationRequestsAreAvailable)
         #expect(
             manager.captureRequestScope(
                 ifCurrent: manager.captureRequestGeneration(),
                 isAuthenticated: true
             ) == nil
+        )
+        #expect(
+            !restartAcceptsAuthentication(
+                userDefaults: userDefaults,
+                keychainService: keychain
+            )
         )
     }
 
@@ -1477,6 +1617,27 @@ struct RomMAPICompatibilityTests {
         )
     }
 
+    private func restartAcceptsAuthentication(
+        userDefaults: UserDefaults,
+        keychainService: PKeychainService
+    ) -> Bool {
+        let manager = imageSessionManager()
+        let tokenService = ClientTokenAuthService(
+            keychainService: keychainService,
+            sessionManager: manager
+        )
+        let repository = SetupRepository(
+            sessionManager: manager,
+            clientTokenAuthService: tokenService,
+            userDefaults: userDefaults
+        )
+        return StoredAuthenticationPolicy.isAuthenticated(
+            configuration: repository.getSetupConfiguration(),
+            authMethod: repository.getAuthMethod(),
+            clientToken: tokenService.getToken()
+        )
+    }
+
     private func statusResponseClient(
         notificationCenter: NotificationCenter
     ) -> RommAPIClient {
@@ -1631,11 +1792,15 @@ private final class BlockingKeychainService: PKeychainService, @unchecked Sendab
 
 private final class FaultInjectingKeychainService: PKeychainService {
     private var values: [String: String] = [:]
-    private var saveFailures: Set<String> = []
-    private var deleteFailures: Set<String> = []
+    private var saveAttempts: [String: Int] = [:]
+    private var deleteAttempts: [String: Int] = [:]
+    private var saveFailures: [String: Set<Int>] = [:]
+    private var deleteFailures: [String: Set<Int>] = [:]
 
     func save(key: String, value: String) throws {
-        if saveFailures.remove(key) != nil {
+        let attempt = (saveAttempts[key] ?? 0) + 1
+        saveAttempts[key] = attempt
+        if saveFailures[key]?.remove(attempt) != nil {
             throw ClientTokenError.tokenSaveFailed
         }
         values[key] = value
@@ -1646,18 +1811,30 @@ private final class FaultInjectingKeychainService: PKeychainService {
     }
 
     func delete(key: String) throws {
-        if deleteFailures.remove(key) != nil {
+        let attempt = (deleteAttempts[key] ?? 0) + 1
+        deleteAttempts[key] = attempt
+        if deleteFailures[key]?.remove(attempt) != nil {
             throw ClientTokenError.tokenCleanupFailed("injected delete failure")
         }
         values.removeValue(forKey: key)
     }
 
     func failNextSave(for key: String) {
-        saveFailures.insert(key)
+        failSave(for: key, afterAdditionalAttempts: 0)
+    }
+
+    func failSave(for key: String, afterAdditionalAttempts: Int) {
+        let attempt = (saveAttempts[key] ?? 0) + afterAdditionalAttempts + 1
+        saveFailures[key, default: []].insert(attempt)
     }
 
     func failNextDelete(for key: String) {
-        deleteFailures.insert(key)
+        failDelete(for: key, afterAdditionalAttempts: 0)
+    }
+
+    func failDelete(for key: String, afterAdditionalAttempts: Int) {
+        let attempt = (deleteAttempts[key] ?? 0) + afterAdditionalAttempts + 1
+        deleteFailures[key, default: []].insert(attempt)
     }
 }
 

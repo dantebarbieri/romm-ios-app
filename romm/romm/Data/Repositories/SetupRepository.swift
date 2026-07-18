@@ -65,6 +65,20 @@ struct SetupConfiguration: Codable {
     }
 }
 
+enum StoredAuthenticationPolicy {
+    static func isAuthenticated(
+        configuration: SetupConfiguration?,
+        authMethod: AuthMethod,
+        clientToken: String?
+    ) -> Bool {
+        guard let configuration else {
+            return false
+        }
+        return configuration.token != nil
+            || (authMethod == .clientToken && clientToken != nil)
+    }
+}
+
 // MARK: - Setup Repository Protocol
 protocol PSetupRepository {
     func saveSetupConfiguration(_ config: SetupConfiguration) throws
@@ -525,6 +539,22 @@ class SetupRepository: PSetupRepository {
                 saveAuthMethodStorage(.clientToken)
             } catch {
                 let originalError = error
+                do {
+                    try clientTokenAuthService.restoreTokenStorage(tokenSnapshot)
+                } catch {
+                    let rollbackError = error
+                    invalidatePersistedAuthentication()
+                    var rollbackReason = rollbackError.localizedDescription
+                    do {
+                        try clientTokenAuthService.clearTokenStorage()
+                    } catch {
+                        rollbackReason += "; fail-closed cleanup: \(error.localizedDescription)"
+                    }
+                    throw SetupRepositoryError.authenticationRollbackFailed(
+                        original: originalError.localizedDescription,
+                        rollback: rollbackReason
+                    )
+                }
                 restoreUserDefaultsValue(
                     previousConfiguration,
                     forKey: setupConfigurationKey
@@ -533,14 +563,6 @@ class SetupRepository: PSetupRepository {
                     previousAuthMethod,
                     forKey: authMethodKey
                 )
-                do {
-                    try clientTokenAuthService.restoreTokenStorage(tokenSnapshot)
-                } catch {
-                    throw SetupRepositoryError.authenticationRollbackFailed(
-                        original: originalError.localizedDescription,
-                        rollback: error.localizedDescription
-                    )
-                }
 
                 let previousMethod = previousAuthMethod.flatMap(AuthMethod.init)
                     ?? .classic
@@ -574,6 +596,12 @@ class SetupRepository: PSetupRepository {
         } else {
             userDefaults.removeObject(forKey: key)
         }
+    }
+
+    private func invalidatePersistedAuthentication() {
+        userDefaults.removeObject(forKey: setupConfigurationKey)
+        userDefaults.removeObject(forKey: authMethodKey)
+        logger.error("Persisted authentication invalidated after rollback failure")
     }
 }
 

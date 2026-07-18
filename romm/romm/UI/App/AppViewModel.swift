@@ -105,10 +105,13 @@ class AppViewModel {
         let config = try? getSetupConfigurationUseCase.execute()
 
         if let config {
-            // Check if we have valid auth: either a token in config (classic)
-            // or a client token in Keychain
-            let authMethod = SetupRepository().getAuthMethod()
-            let hasAuth = config.token != nil || (authMethod == .clientToken && ClientTokenAuthService().getToken() != nil)
+            let setupRepository = SetupRepository()
+            let authMethod = setupRepository.getAuthMethod()
+            let hasAuth = StoredAuthenticationPolicy.isAuthenticated(
+                configuration: config,
+                authMethod: authMethod,
+                clientToken: ClientTokenAuthService().getToken()
+            )
 
             if hasAuth {
                 logger.info("Authentication state: \(appData.isAuthenticated) (method: \(authMethod.displayName))")
