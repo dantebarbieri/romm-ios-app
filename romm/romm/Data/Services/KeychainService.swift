@@ -11,7 +11,14 @@ import Security
 protocol PKeychainService {
     func save(key: String, value: String) throws
     func get(key: String) -> String?
+    func read(key: String) throws -> String?
     func delete(key: String) throws
+}
+
+extension PKeychainService {
+    func read(key: String) throws -> String? {
+        get(key: key)
+    }
 }
 
 enum KeychainError: LocalizedError {
@@ -66,6 +73,15 @@ class KeychainService: PKeychainService {
     }
     
     func get(key: String) -> String? {
+        do {
+            return try read(key: key)
+        } catch {
+            logger.error("Keychain retrieval failed for service '\(service)': \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func read(key: String) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: key,
@@ -77,15 +93,16 @@ class KeychainService: PKeychainService {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            if status != errSecItemNotFound {
-                logger.error("Keychain retrieval error for service '\(service)': \(status)")
-            }
+        if status == errSecItemNotFound {
             return nil
         }
-        
+        guard status == errSecSuccess else {
+            throw KeychainError.retrievalFailed(status)
+        }
+        guard let data = item as? Data,
+              let value = String(data: data, encoding: .utf8) else {
+            throw KeychainError.retrievalFailed(errSecDecode)
+        }
         return value
     }
     

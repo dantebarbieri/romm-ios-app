@@ -20,6 +20,8 @@ enum ClientTokenError: LocalizedError {
     case scopeFetchFailed
     case cameraUnavailable
     case rateLimited
+    case tokenCleanupFailed(String)
+    case tokenRollbackFailed(original: String, rollback: String)
 
     var errorDescription: String? {
         switch self {
@@ -41,7 +43,20 @@ enum ClientTokenError: LocalizedError {
             return "Camera is not available on this device."
         case .rateLimited:
             return "Too many attempts. Please wait before trying again."
+        case .tokenCleanupFailed(let reason):
+            return "Failed to clear client-token storage: \(reason)"
+        case .tokenRollbackFailed(let original, let rollback):
+            return "Client-token update failed (\(original)) and rollback failed (\(rollback))."
         }
+    }
+}
+
+struct ClientTokenStorageSnapshot {
+    let token: String?
+    let tokenInfo: String?
+
+    var hasCredentials: Bool {
+        token != nil
     }
 }
 
@@ -299,13 +314,37 @@ extension ClientTokenAuthService {
 
     /// Saves the client token string and its info to the Keychain.
     func saveToken(_ token: String, info: ClientTokenInfo) throws {
+        var transitionError: Error?
         try sessionManager.performAuthenticationMutation {
+            let snapshot: ClientTokenStorageSnapshot
+            do {
+                snapshot = try snapshotTokenStorage()
+            } catch {
+                transitionError = error
+                return
+            }
+
             do {
                 try saveTokenStorage(token, info: info)
             } catch {
-                clearTokenStorage()
-                throw error
+                let originalError = error
+                do {
+                    try restoreTokenStorage(snapshot)
+                } catch {
+                    throw ClientTokenError.tokenRollbackFailed(
+                        original: originalError.localizedDescription,
+                        rollback: error.localizedDescription
+                    )
+                }
+                if snapshot.hasCredentials {
+                    transitionError = originalError
+                } else {
+                    throw originalError
+                }
             }
+        }
+        if let transitionError {
+            throw transitionError
         }
     }
 
@@ -346,15 +385,87 @@ extension ClientTokenAuthService {
         return try? JSONDecoder().decode(ClientTokenInfo.self, from: data)
     }
 
-    /// Deletes both the token and token info from the Keychain.
-    func clearToken() {
-        sessionManager.reset()
-        clearTokenStorage()
+    func snapshotTokenStorage() throws -> ClientTokenStorageSnapshot {
+        ClientTokenStorageSnapshot(
+            token: try keychainService.read(key: Self.tokenKeychainKey),
+            tokenInfo: try keychainService.read(key: Self.tokenInfoKeychainKey)
+        )
     }
 
-    func clearTokenStorage() {
-        try? keychainService.delete(key: Self.tokenKeychainKey)
-        try? keychainService.delete(key: Self.tokenInfoKeychainKey)
+    func restoreTokenStorage(_ snapshot: ClientTokenStorageSnapshot) throws {
+        var failures: [String] = []
+        restoreStorageValue(
+            snapshot.token,
+            key: Self.tokenKeychainKey,
+            label: "token",
+            failures: &failures
+        )
+        restoreStorageValue(
+            snapshot.tokenInfo,
+            key: Self.tokenInfoKeychainKey,
+            label: "token metadata",
+            failures: &failures
+        )
+        guard failures.isEmpty else {
+            let reason = failures.joined(separator: "; ")
+            logger.error("Failed to restore client-token storage: \(reason)")
+            throw ClientTokenError.tokenCleanupFailed(reason)
+        }
+        logger.info("Previous client-token storage restored")
+    }
+
+    /// Deletes both the token and token info from the Keychain.
+    func clearToken() throws {
+        sessionManager.reset()
+        try clearTokenStorage()
+    }
+
+    func clearTokenStorage() throws {
+        var failures: [String] = []
+        deleteStorageValue(
+            key: Self.tokenKeychainKey,
+            label: "token",
+            failures: &failures
+        )
+        deleteStorageValue(
+            key: Self.tokenInfoKeychainKey,
+            label: "token metadata",
+            failures: &failures
+        )
+        guard failures.isEmpty else {
+            let reason = failures.joined(separator: "; ")
+            logger.error("Failed to clear client-token storage: \(reason)")
+            throw ClientTokenError.tokenCleanupFailed(reason)
+        }
         logger.info("Client token cleared from Keychain")
+    }
+
+    private func restoreStorageValue(
+        _ value: String?,
+        key: String,
+        label: String,
+        failures: inout [String]
+    ) {
+        do {
+            if let value {
+                try keychainService.save(key: key, value: value)
+            } else {
+                try keychainService.delete(key: key)
+            }
+        } catch {
+            failures.append("\(label): \(error.localizedDescription)")
+        }
+    }
+
+    private func deleteStorageValue(
+        key: String,
+        label: String,
+        failures: inout [String]
+    ) {
+        do {
+            try keychainService.delete(key: key)
+        } catch {
+            failures.append("\(label): \(error.localizedDescription)")
+        }
     }
 }

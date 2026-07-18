@@ -502,28 +502,79 @@ class SetupRepository: PSetupRepository {
             version: version,
             allowIncompatibleVersionLogin: allowIncompatibleVersionLogin
         )
+        var transitionError: Error?
         try sessionManager.performAuthenticationMutation {
+            let previousConfiguration = userDefaults.string(
+                forKey: setupConfigurationKey
+            )
+            let previousAuthMethod = userDefaults.string(forKey: authMethodKey)
+            let tokenSnapshot: ClientTokenStorageSnapshot
+            do {
+                tokenSnapshot = try clientTokenAuthService.snapshotTokenStorage()
+            } catch {
+                if previousConfiguration != nil {
+                    transitionError = error
+                    return
+                }
+                throw error
+            }
+
             do {
                 try clientTokenAuthService.saveTokenStorage(token, info: tokenInfo)
                 try saveSetupConfigurationStorage(setupConfig)
                 saveAuthMethodStorage(.clientToken)
             } catch {
-                clientTokenAuthService.clearTokenStorage()
-                userDefaults.removeObject(forKey: setupConfigurationKey)
-                userDefaults.removeObject(forKey: authMethodKey)
-                throw error
+                let originalError = error
+                restoreUserDefaultsValue(
+                    previousConfiguration,
+                    forKey: setupConfigurationKey
+                )
+                restoreUserDefaultsValue(
+                    previousAuthMethod,
+                    forKey: authMethodKey
+                )
+                do {
+                    try clientTokenAuthService.restoreTokenStorage(tokenSnapshot)
+                } catch {
+                    throw SetupRepositoryError.authenticationRollbackFailed(
+                        original: originalError.localizedDescription,
+                        rollback: error.localizedDescription
+                    )
+                }
+
+                let previousMethod = previousAuthMethod.flatMap(AuthMethod.init)
+                    ?? .classic
+                let hadRestorableAuthentication = previousConfiguration != nil
+                    && (previousMethod != .clientToken
+                        || tokenSnapshot.hasCredentials)
+                if hadRestorableAuthentication {
+                    transitionError = originalError
+                } else {
+                    throw originalError
+                }
             }
+        }
+        if let transitionError {
+            throw transitionError
         }
         logger.info("Client token setup saved")
     }
 
     func clearClientTokenData() throws {
         logger.info("Clearing client token data...")
-        clientTokenAuthService.clearToken()
+        try clientTokenAuthService.clearToken()
         logger.info("Client token data cleared")
     }
 
     // MARK: - Private Helper Methods (continued)
+
+    private func restoreUserDefaultsValue(_ value: String?, forKey key: String) {
+        if let value {
+            userDefaults.set(value, forKey: key)
+        } else {
+            userDefaults.removeObject(forKey: key)
+        }
+    }
 }
 
 // MARK: - Setup Repository Error
@@ -531,6 +582,7 @@ enum SetupRepositoryError: LocalizedError {
     case keychainError(OSStatus)
     case dataNotFound
     case invalidData
+    case authenticationRollbackFailed(original: String, rollback: String)
     
     var errorDescription: String? {
         switch self {
@@ -540,6 +592,8 @@ enum SetupRepositoryError: LocalizedError {
             return "Setup data not found"
         case .invalidData:
             return "Invalid setup data"
+        case .authenticationRollbackFailed(let original, let rollback):
+            return "Authentication update failed (\(original)) and rollback failed (\(rollback))."
         }
     }
 }
