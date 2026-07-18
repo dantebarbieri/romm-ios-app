@@ -12,12 +12,12 @@ struct EmulatorRouterView: View {
 
     var body: some View {
         switch decision {
-        case .web(let rom):
-            EmulatorView(rom: rom)
-        case .native(let rom, let gameType):
-            NativeEmulatorView(rom: rom, gameType: gameType)
-        case .libretro(let rom, let core):
-            LibretroEmulatorView(rom: rom, core: core)
+        case .web(let rom, let source):
+            EmulatorView(rom: rom, launchSource: source)
+        case .native(let rom, let gameType, let source):
+            NativeEmulatorView(rom: rom, gameType: gameType, launchSource: source)
+        case .libretro(let rom, let core, let source):
+            LibretroEmulatorView(rom: rom, core: core, launchSource: source)
         }
     }
 }

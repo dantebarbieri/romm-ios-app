@@ -8,8 +8,8 @@ struct LibretroEmulatorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    init(rom: Rom, core: LibretroCore, factory: PDependencyFactory = DefaultDependencyFactory.shared) {
-        let vm = factory.makeLibretroEmulatorViewModel(rom: rom, core: core)
+    init(rom: Rom, core: LibretroCore, launchSource: GameLaunchSource?, factory: PDependencyFactory = DefaultDependencyFactory.shared) {
+        let vm = factory.makeLibretroEmulatorViewModel(rom: rom, core: core, source: launchSource)
         self._viewModel = SwiftUI.State(wrappedValue: vm)
     }
 

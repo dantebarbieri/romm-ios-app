@@ -15,6 +15,7 @@ import MelonDSDeltaCore
 final class NativeEmulatorViewModel {
     let rom: Rom
     let gameType: DeltaGameType
+    let launchSource: GameLaunchSource?
     var errorMessage: String?
     var session: NativeEmulatorSession?
     var isLoading: Bool = true
@@ -28,6 +29,7 @@ final class NativeEmulatorViewModel {
     init(
         rom: Rom,
         gameType: DeltaGameType,
+        launchSource: GameLaunchSource?,
         getDownloadedROM: PGetDownloadedROMUseCase,
         resolveROMFile: PResolveROMFileUseCase,
         saveStates: PEmulatorSaveStatesUseCase,
@@ -35,6 +37,7 @@ final class NativeEmulatorViewModel {
     ) {
         self.rom = rom
         self.gameType = gameType
+        self.launchSource = launchSource
         self.getDownloadedROM = getDownloadedROM
         self.resolveROMFile = resolveROMFile
         self.saveStates = saveStates
@@ -65,8 +68,13 @@ final class NativeEmulatorViewModel {
             session = NativeEmulatorSession(
                 gameURL: url, gameType: deltaType,
                 romId: rom.id, saveStates: saveStates,
-                cloudSync: cloudSync
+                cloudSync: cloudSync,
+                launchSource: launchSource
             )
+            session?.onLaunchError = { [weak self] error in
+                self?.errorMessage = error.localizedDescription
+                self?.isLoading = false
+            }
             session?.start()
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_200_000_000)

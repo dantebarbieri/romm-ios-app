@@ -6,6 +6,13 @@ import Foundation
 /// "no UseCase-inside-UseCase" rule.
 @MainActor
 final class CloudSaveSyncService {
+    enum SelectedSourceError: LocalizedError {
+        case missingLocalData
+
+        var errorDescription: String? {
+            "The selected save or state is no longer available on this device."
+        }
+    }
 
     struct Config {
         let romId: Int
@@ -69,6 +76,59 @@ final class CloudSaveSyncService {
         guard isEnabled else { return }
         await pullBattery()
         await pullStates()
+    }
+
+    func prepareForLaunch(source: GameLaunchSource?) async throws {
+        var selectedLocalData: Data?
+        if let source, source.serverID == nil {
+            switch source {
+            case .save:
+                selectedLocalData = try saveStore.readBattery(romId: config.romId)
+            case .state(_, let slot, _, _, _):
+                selectedLocalData = try saveStore.readState(romId: config.romId, slot: slot)
+            }
+        }
+
+        await pullBeforeLaunch()
+        guard let source else { return }
+
+        if source.serverID == nil {
+            guard let selectedLocalData else {
+                throw SelectedSourceError.missingLocalData
+            }
+            switch source {
+            case .save(_, _, let updatedAt):
+                try saveStore.writeBattery(romId: config.romId, data: selectedLocalData)
+                if let updatedAt {
+                    try saveStore.setBatteryModifiedAt(romId: config.romId, date: updatedAt)
+                }
+            case .state(_, let slot, _, let updatedAt, _):
+                try saveStore.writeState(romId: config.romId, slot: slot, data: selectedLocalData)
+                if let updatedAt {
+                    try saveStore.setStateModifiedAt(romId: config.romId, slot: slot, date: updatedAt)
+                }
+            }
+            return
+        }
+
+        guard let serverID = source.serverID else { return }
+
+        switch source {
+        case .save(_, _, let updatedAt):
+            let data = try await downloadSaveUseCase.execute(id: serverID)
+            try saveStore.writeBattery(romId: config.romId, data: data)
+            if let updatedAt {
+                try saveStore.setBatteryModifiedAt(romId: config.romId, date: updatedAt)
+            }
+            serverBatteryId = serverID
+        case .state(_, let slot, _, let updatedAt, _):
+            let data = try await downloadStateUseCase.execute(id: serverID)
+            try saveStore.writeState(romId: config.romId, slot: slot, data: data)
+            if let updatedAt {
+                try saveStore.setStateModifiedAt(romId: config.romId, slot: slot, date: updatedAt)
+            }
+            serverStateIdBySlot[slot] = serverID
+        }
     }
 
     private func pullBattery() async {

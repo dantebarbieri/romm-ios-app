@@ -3,6 +3,7 @@ import Foundation
 protocol PSaveStore {
     func readBattery(romId: Int) throws -> Data?
     func writeBattery(romId: Int, data: Data) throws
+    func deleteBattery(romId: Int) throws
     func batteryModifiedAt(romId: Int) -> Date?
     func setBatteryModifiedAt(romId: Int, date: Date) throws
 

@@ -47,8 +47,10 @@ final class NativeEmulatorSession: NSObject, GameViewControllerDelegate {
     private let saveStates: PEmulatorSaveStatesUseCase
     private let romId: Int
     private let cloudSync: CloudSaveSyncService?
+    private let launchSource: GameLaunchSource?
 
     var onMenuRequested: (() -> Void)?
+    var onLaunchError: ((Error) -> Void)?
 
     let viewController: GameViewController
 
@@ -62,12 +64,20 @@ final class NativeEmulatorSession: NSObject, GameViewControllerDelegate {
         viewController.emulatorCore
     }
 
-    init(gameURL: URL, gameType: GameType, romId: Int, saveStates: PEmulatorSaveStatesUseCase, cloudSync: CloudSaveSyncService? = nil) {
+    init(
+        gameURL: URL,
+        gameType: GameType,
+        romId: Int,
+        saveStates: PEmulatorSaveStatesUseCase,
+        cloudSync: CloudSaveSyncService? = nil,
+        launchSource: GameLaunchSource? = nil
+    ) {
         self.gameURL = gameURL
         self.gameType = gameType
         self.romId = romId
         self.saveStates = saveStates
         self.cloudSync = cloudSync
+        self.launchSource = launchSource
 
         let vc = RommGameViewController()
         vc.loadViewIfNeeded()
@@ -106,11 +116,19 @@ final class NativeEmulatorSession: NSObject, GameViewControllerDelegate {
 
     func start() {
         Task { [weak self] in
-            await self?.cloudSync?.pullBeforeLaunch()
-            self?.loadBatteryIfAvailable()
-            self?.viewController.startEmulation()
-            self?.attachExternalControllers()
-            self?.observeControllerConnections()
+            guard let self else { return }
+            do {
+                try await cloudSync?.prepareForLaunch(source: launchSource)
+                loadBatteryIfAvailable()
+                viewController.startEmulation()
+                if case .state(_, let slot, _, _, _) = launchSource {
+                    try loadState(slot: slot)
+                }
+                attachExternalControllers()
+                observeControllerConnections()
+            } catch {
+                onLaunchError?(error)
+            }
         }
     }
 
@@ -254,9 +272,12 @@ final class NativeEmulatorSession: NSObject, GameViewControllerDelegate {
     // MARK: - Battery
 
     private func loadBatteryIfAvailable() {
-        guard let raw = try? saveStates.readBattery(romId: romId) else { return }
-        let data = adaptBatteryForCore(raw: raw)
         let savURL = Game(fileURL: gameURL, type: gameType).gameSaveURL
+        guard let raw = try? saveStates.readBattery(romId: romId) else {
+            try? FileManager.default.removeItem(at: savURL)
+            return
+        }
+        let data = adaptBatteryForCore(raw: raw)
         try? data.write(to: savURL, options: .atomic)
     }
 

@@ -16,6 +16,10 @@ protocol PDownloadStateUseCase {
     func execute(id: Int) async throws -> Data
 }
 
+protocol PDeleteStatesUseCase {
+    func execute(ids: [Int]) async throws
+}
+
 final class ListServerStatesUseCase: PListServerStatesUseCase {
     private let repository: PStatesRepository
     init(repository: PStatesRepository) { self.repository = repository }
@@ -59,5 +63,14 @@ final class DownloadStateUseCase: PDownloadStateUseCase {
     init(repository: PStatesRepository) { self.repository = repository }
     func execute(id: Int) async throws -> Data {
         try await repository.downloadState(id: id)
+    }
+}
+
+final class DeleteStatesUseCase: PDeleteStatesUseCase {
+    private let repository: PStatesRepository
+    init(repository: PStatesRepository) { self.repository = repository }
+    func execute(ids: [Int]) async throws {
+        guard !ids.isEmpty else { return }
+        try await repository.deleteStates(ids: ids)
     }
 }

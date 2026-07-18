@@ -25,6 +25,13 @@ final class LocalSaveStoreRepository: PSaveStore {
         try data.write(to: SaveStorePaths.batteryURL(root: rootDirectory, romId: romId), options: .atomic)
     }
 
+    func deleteBattery(romId: Int) throws {
+        let url = SaveStorePaths.batteryURL(root: rootDirectory, romId: romId)
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
+    }
+
     func batteryModifiedAt(romId: Int) -> Date? {
         let url = SaveStorePaths.batteryURL(root: rootDirectory, romId: romId)
         guard fileManager.fileExists(atPath: url.path) else { return nil }

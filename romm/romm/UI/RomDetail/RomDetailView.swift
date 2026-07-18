@@ -11,6 +11,7 @@ import SafariServices
 struct RomDetailView: View {
     let rom: Rom
     @State private var viewModel = RomDetailViewModel()
+    @State private var gameDataViewModel: SyncSaveViewModel
     
     @Environment(\.dismiss) private var dismiss
     @State private var scrollOffset: CGFloat = 0
@@ -23,17 +24,11 @@ struct RomDetailView: View {
     @State private var showingSFTPUpload = false
     @State private var showingCollectionPicker = false
     @State private var showingFullScreenPDF = false
-    @State private var selectedGameDataTab: GameDataTabType = .states
     
     enum DetailTab: String, CaseIterable {
         case details = "DETAILS"
         case manual = "MANUAL"
         case game = "GAME DATA"
-    }
-    
-    enum GameDataTabType: String, CaseIterable {
-        case states = "States"
-        case saves = "Saves"
     }
     
     private enum CoordinateSpaces {
@@ -42,6 +37,12 @@ struct RomDetailView: View {
     
     init(rom: Rom) {
         self.rom = rom
+        _gameDataViewModel = State(
+            initialValue: DefaultDependencyFactory.shared.makeGameDataViewModel(
+                romID: rom.id,
+                fileName: rom.fileName ?? rom.name
+            )
+        )
     }
     
     // Create ROM object for currently selected variant (original or sibling)
@@ -150,11 +151,9 @@ struct RomDetailView: View {
                             Task {
                                 await viewModel.loadManual(for: rom.id)
                             }
-                        } else if newTab == .game && viewModel.saves.isEmpty && viewModel.states.isEmpty && !viewModel.isLoadingSaves && !viewModel.isLoadingStates {
+                        } else if newTab == .game && gameDataViewModel.serverSaves.isEmpty && gameDataViewModel.serverStates.isEmpty && !gameDataViewModel.isLoadingServer {
                             Task {
-                                async let savesTask = viewModel.loadSaves(for: rom.id)
-                                async let statesTask = viewModel.loadStates(for: rom.id)
-                                await (savesTask, statesTask)
+                                await gameDataViewModel.loadAll()
                             }
                         }
                     }
@@ -189,6 +188,9 @@ struct RomDetailView: View {
                     }
                     .fullScreenCover(item: $viewModel.launchDecision, onDismiss: {
                         viewModel.emulatorPresentationDidEnd()
+                        Task {
+                            await gameDataViewModel.loadAll()
+                        }
                     }) { decision in
                         EmulatorRouterView(decision: decision)
                     }
@@ -378,8 +380,15 @@ struct RomDetailView: View {
                             Text("Starting…")
                                 .font(.headline)
                         } else {
-                            Label("Play", systemImage: "play.circle.fill")
-                                .font(.headline)
+                            VStack(spacing: 2) {
+                                Label("Play", systemImage: "play.circle.fill")
+                                    .font(.headline)
+                                if let source = gameDataViewModel.selectedSource {
+                                    Text(source.title)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                }
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -578,88 +587,9 @@ struct RomDetailView: View {
     
     @ViewBuilder
     private var gameContent: some View {
-        VStack(spacing: 0) {
-            if viewModel.isLoadingSaves || viewModel.isLoadingStates {
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .scaleEffect(1.2)
-                    
-                    Text("Loading game data...")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 60)
-            } else {
-                // Game Data Tabs
-                HStack(spacing: 0) {
-                    ForEach(GameDataTabType.allCases, id: \.self) { tabType in
-                        Button(action: {
-                            selectedGameDataTab = tabType
-                        }) {
-                            GameDataTab(
-                                title: tabType.rawValue,
-                                isSelected: selectedGameDataTab == tabType,
-                                icon: tabType == .states ? "gamecontroller.fill" : "folder.fill"
-                            )
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                    }
-                }
-                .padding(.top, 20)
-                
-                // Content Area
-                VStack(spacing: 0) {
-                    switch selectedGameDataTab {
-                    case .states:
-                        if !viewModel.states.isEmpty {
-                            ForEach(viewModel.states) { state in
-                                GameDataCard(
-                                    fileName: state.fileNameNoExt,
-                                    fileSize: formatFileSize(state.fileSizeBytes),
-                                    dateUpdated: formatDate(state.updatedAt),
-                                    screenshot: state.screenshot
-                                )
-                            }
-                        } else {
-                            VStack(spacing: 16) {
-                                Image(systemName: "gamecontroller")
-                                    .font(.system(size: 50))
-                                    .foregroundColor(.secondary)
-                                
-                                Text("No states available")
-                                    .font(.headline)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.top, 60)
-                        }
-                    case .saves:
-                        if !viewModel.saves.isEmpty {
-                            ForEach(viewModel.saves) { save in
-                                GameDataCard(
-                                    fileName: save.fileNameNoExt,
-                                    fileSize: formatFileSize(save.fileSizeBytes),
-                                    dateUpdated: formatDate(save.updatedAt),
-                                    screenshot: save.screenshot
-                                )
-                            }
-                        } else {
-                            VStack(spacing: 16) {
-                                Image(systemName: "folder")
-                                    .font(.system(size: 50))
-                                    .foregroundColor(.secondary)
-                                
-                                Text("No saves available")
-                                    .font(.headline)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.top, 60)
-                        }
-                    }
-                    
-                    Spacer()
-                }
-                .padding(.top, 20)
-            }
+        RomGameDataSection(viewModel: gameDataViewModel) {
+            guard !viewModel.isLaunchingEmulator else { return }
+            Task { await viewModel.launchEmulator(rom: currentSelectedRom) }
         }
     }
     

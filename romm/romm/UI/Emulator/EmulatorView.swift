@@ -16,9 +16,9 @@ struct EmulatorView: View {
     @State private var showExitConfirmation = false
     @State private var showMenu = false
 
-    init(rom: Rom) {
+    init(rom: Rom, launchSource: GameLaunchSource?) {
         self.rom = rom
-        _viewModel = State(initialValue: EmulatorViewModel(rom: rom))
+        _viewModel = State(initialValue: EmulatorViewModel(rom: rom, launchSource: launchSource))
     }
 
     var body: some View {
@@ -555,4 +555,3 @@ struct EmulatorWebView: UIViewRepresentable {
         }
     }
 }
-

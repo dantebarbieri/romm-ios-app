@@ -34,6 +34,12 @@ private final class StubCheckSupport: PCheckEmulatorSupportUseCase {
     func execute(platformSlug: String) -> Bool { supported }
 }
 
+private final class StubLaunchSourcePreference: PGameLaunchSourcePreference {
+    var selected: GameLaunchSource?
+    func source(for romID: Int) -> GameLaunchSource? { selected }
+    func setSource(_ source: GameLaunchSource?, for romID: Int) { selected = source }
+}
+
 private func makeRom(slug: String = "gba") -> Rom {
     Rom(id: 1, name: "Test", platformId: 0, urlCover: nil,
         isFavourite: false, hasRetroAchievements: false, isPlayable: true,
@@ -47,7 +53,8 @@ struct LaunchEmulatorUseCaseTests {
             tokenProvider: token,
             checkEmulatorSupport: StubCheckSupport(),
             enginePreference: StubPreference(.web),
-            platformSupport: StubSupport()
+            platformSupport: StubSupport(),
+            launchSourcePreference: StubLaunchSourcePreference()
         )
         let result = await useCase.execute(rom: makeRom())
         if case .failure(.noServerConfigured) = result {} else { Issue.record("expected .noServerConfigured") }
@@ -59,7 +66,8 @@ struct LaunchEmulatorUseCaseTests {
             tokenProvider: StubTokenProvider(),
             checkEmulatorSupport: StubCheckSupport(),
             enginePreference: StubPreference(.web),
-            platformSupport: support
+            platformSupport: support,
+            launchSourcePreference: StubLaunchSourcePreference()
         )
         let result = await useCase.execute(rom: makeRom())
         if case .success(let decision) = result, case .web = decision {} else {
@@ -73,11 +81,12 @@ struct LaunchEmulatorUseCaseTests {
             tokenProvider: StubTokenProvider(),
             checkEmulatorSupport: StubCheckSupport(),
             enginePreference: StubPreference(.native),
-            platformSupport: support
+            platformSupport: support,
+            launchSourcePreference: StubLaunchSourcePreference()
         )
         let result = await useCase.execute(rom: makeRom(slug: "gba"))
         if case .success(let decision) = result,
-           case .native(_, let gameType) = decision {
+           case .native(_, let gameType, _) = decision {
             #expect(gameType == .gba)
         } else {
             Issue.record("expected .native(.gba) decision")
@@ -90,11 +99,38 @@ struct LaunchEmulatorUseCaseTests {
             tokenProvider: StubTokenProvider(),
             checkEmulatorSupport: StubCheckSupport(),
             enginePreference: StubPreference(.native),
-            platformSupport: support
+            platformSupport: support,
+            launchSourcePreference: StubLaunchSourcePreference()
         )
         let result = await useCase.execute(rom: makeRom(slug: "psx"))
         if case .success(let decision) = result, case .web = decision {} else {
             Issue.record("expected fallback to .web")
+        }
+    }
+
+    @Test func rejectsStateCreatedByDifferentNativeEngine() async {
+        let support = StubSupport(); support.engines = [.native]
+        let launchSource = StubLaunchSourcePreference()
+        launchSource.selected = .state(
+            serverID: 9,
+            slot: 1,
+            fileName: "state.state",
+            updatedAt: nil,
+            emulator: "mgba"
+        )
+        let useCase = LaunchEmulatorUseCase(
+            tokenProvider: StubTokenProvider(),
+            checkEmulatorSupport: StubCheckSupport(),
+            enginePreference: StubPreference(.native),
+            platformSupport: support,
+            launchSourcePreference: launchSource
+        )
+
+        let result = await useCase.execute(rom: makeRom(slug: "gba"))
+
+        if case .failure(.incompatibleState(expected: "delta-ios", actual: "mgba")) = result {
+        } else {
+            Issue.record("expected incompatible state failure")
         }
     }
 }

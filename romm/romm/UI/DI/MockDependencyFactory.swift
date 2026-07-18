@@ -33,6 +33,7 @@ class MockDependencyFactory: PDependencyFactory {
     // Emulator engine
     lazy var enginePreference: PEmulatorEnginePreference = UserDefaultsEmulatorEnginePreferenceStore()
     lazy var libretroAspectRatioPreference: PLibretroAspectRatioPreference = InMemoryLibretroAspectRatioPreference()
+    lazy var gameLaunchSourcePreference: PGameLaunchSourcePreference = UserDefaultsGameLaunchSourcePreferenceStore()
     
     init(
         authRepository: PAuthRepository? = nil,
@@ -315,7 +316,8 @@ class MockDependencyFactory: PDependencyFactory {
             tokenProvider: tokenProvider,
             checkEmulatorSupport: makeCheckEmulatorSupportUseCase(),
             enginePreference: enginePreference,
-            platformSupport: makePlatformEngineSupport()
+            platformSupport: makePlatformEngineSupport(),
+            launchSourcePreference: gameLaunchSourcePreference
         )
     }
 
@@ -356,10 +358,11 @@ class MockDependencyFactory: PDependencyFactory {
         )
     }
 
-    @MainActor func makeLibretroEmulatorViewModel(rom: Rom, core: LibretroCore) -> LibretroEmulatorViewModel {
+    @MainActor func makeLibretroEmulatorViewModel(rom: Rom, core: LibretroCore, source: GameLaunchSource?) -> LibretroEmulatorViewModel {
         LibretroEmulatorViewModel(
             rom: rom,
             core: core,
+            launchSource: source,
             getDownloadedROM: makeGetDownloadedROMUseCase(),
             resolveROMFile: makeResolveROMFileUseCase(),
             saveStates: makeEmulatorSaveStatesUseCase(),
@@ -379,14 +382,22 @@ class MockDependencyFactory: PDependencyFactory {
     func makeUpdateSaveUseCase() -> PUpdateSaveUseCase { UpdateSaveUseCase(repository: savesRepository) }
     func makeUploadStateUseCase() -> PUploadStateUseCase { UploadStateUseCase(repository: statesRepository) }
     func makeUpdateStateUseCase() -> PUpdateStateUseCase { UpdateStateUseCase(repository: statesRepository) }
+    func makeDeleteSavesUseCase() -> PDeleteSavesUseCase { DeleteSavesUseCase(repository: savesRepository) }
+    func makeDeleteStatesUseCase() -> PDeleteStatesUseCase { DeleteStatesUseCase(repository: statesRepository) }
+    func makeDownloadAssetUseCase() -> PDownloadAssetUseCase { DownloadAssetUseCase(apiClient: apiClient) }
 
     func makeGetROMShareFilesUseCase() -> PGetROMShareFilesUseCase {
         GetROMShareFilesUseCase(localROMRepository: localROMRepository)
     }
 
     @MainActor func makeSyncSaveViewModel(rom: DownloadedROM) -> SyncSaveViewModel {
+        makeGameDataViewModel(romID: rom.id, fileName: rom.files.first?.fileName ?? rom.name)
+    }
+
+    @MainActor func makeGameDataViewModel(romID: Int, fileName: String) -> SyncSaveViewModel {
         SyncSaveViewModel(
-            rom: rom,
+            romID: romID,
+            fileName: fileName,
             listSavesUseCase: makeListServerSavesUseCase(),
             listStatesUseCase: makeListServerStatesUseCase(),
             downloadSaveUseCase: makeDownloadSaveUseCase(),
@@ -395,7 +406,11 @@ class MockDependencyFactory: PDependencyFactory {
             updateSaveUseCase: makeUpdateSaveUseCase(),
             uploadStateUseCase: makeUploadStateUseCase(),
             updateStateUseCase: makeUpdateStateUseCase(),
-            saveStore: saveStore
+            deleteSavesUseCase: makeDeleteSavesUseCase(),
+            deleteStatesUseCase: makeDeleteStatesUseCase(),
+            downloadAssetUseCase: makeDownloadAssetUseCase(),
+            saveStore: saveStore,
+            selectionPreference: gameLaunchSourcePreference
         )
     }
 

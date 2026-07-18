@@ -16,6 +16,14 @@ protocol PDownloadSaveUseCase {
     func execute(id: Int) async throws -> Data
 }
 
+protocol PDeleteSavesUseCase {
+    func execute(ids: [Int]) async throws
+}
+
+protocol PDownloadAssetUseCase {
+    func execute(path: String) async throws -> Data
+}
+
 final class ListServerSavesUseCase: PListServerSavesUseCase {
     private let repository: PSavesRepository
     init(repository: PSavesRepository) { self.repository = repository }
@@ -60,5 +68,22 @@ final class DownloadSaveUseCase: PDownloadSaveUseCase {
     init(repository: PSavesRepository) { self.repository = repository }
     func execute(id: Int) async throws -> Data {
         try await repository.downloadSave(id: id)
+    }
+}
+
+final class DeleteSavesUseCase: PDeleteSavesUseCase {
+    private let repository: PSavesRepository
+    init(repository: PSavesRepository) { self.repository = repository }
+    func execute(ids: [Int]) async throws {
+        guard !ids.isEmpty else { return }
+        try await repository.deleteSaves(ids: ids)
+    }
+}
+
+final class DownloadAssetUseCase: PDownloadAssetUseCase {
+    private let apiClient: PRommAPIClient
+    init(apiClient: PRommAPIClient) { self.apiClient = apiClient }
+    func execute(path: String) async throws -> Data {
+        try await apiClient.getBinary(path)
     }
 }

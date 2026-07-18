@@ -7,6 +7,7 @@ import SwiftUI
 final class LibretroEmulatorViewModel {
     let rom: Rom
     let core: LibretroCore
+    let launchSource: GameLaunchSource?
     var errorMessage: String?
     var session: LibretroSession?
     var isLoading: Bool = true
@@ -23,6 +24,7 @@ final class LibretroEmulatorViewModel {
     init(
         rom: Rom,
         core: LibretroCore,
+        launchSource: GameLaunchSource?,
         getDownloadedROM: PGetDownloadedROMUseCase,
         resolveROMFile: PResolveROMFileUseCase,
         saveStates: PEmulatorSaveStatesUseCase,
@@ -32,6 +34,7 @@ final class LibretroEmulatorViewModel {
     ) {
         self.rom = rom
         self.core = core
+        self.launchSource = launchSource
         self.getDownloadedROM = getDownloadedROM
         self.resolveROMFile = resolveROMFile
         self.saveStates = saveStates
@@ -81,7 +84,8 @@ final class LibretroEmulatorViewModel {
                 romId: rom.id,
                 saveStates: saveStates,
                 aspectRatioPreference: aspectRatioPreference,
-                cloudSync: cloudSync
+                cloudSync: cloudSync,
+                launchSource: launchSource
             )
             s.onMenuRequested = { [weak self] in self?.onMenuRequested?() }
             session = s

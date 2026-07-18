@@ -29,6 +29,7 @@ protocol PDependencyFactory {
     var fileValidationService: PFileValidationService { get }
     var tokenProvider: PTokenProvider { get }
     var saveStore: PSaveStore { get }
+    var gameLaunchSourcePreference: PGameLaunchSourcePreference { get }
     
     // Use Cases
     func makeLogoutUseCase() -> LogoutUseCase
@@ -95,6 +96,9 @@ protocol PDependencyFactory {
     func makeUpdateSaveUseCase() -> PUpdateSaveUseCase
     func makeUploadStateUseCase() -> PUploadStateUseCase
     func makeUpdateStateUseCase() -> PUpdateStateUseCase
+    func makeDeleteSavesUseCase() -> PDeleteSavesUseCase
+    func makeDeleteStatesUseCase() -> PDeleteStatesUseCase
+    func makeDownloadAssetUseCase() -> PDownloadAssetUseCase
 
     // Local ROM Use Cases
     func makeGetROMShareFilesUseCase() -> PGetROMShareFilesUseCase
@@ -107,7 +111,7 @@ protocol PDependencyFactory {
     func makeEmulatorSaveStatesUseCase() -> PEmulatorSaveStatesUseCase
     func makeBIOSSyncUseCase() -> PBIOSSyncUseCase
     @MainActor func makeCloudSaveSyncService(romId: Int, emulator: String, batteryFileName: String) -> CloudSaveSyncService
-    @MainActor func makeLibretroEmulatorViewModel(rom: Rom, core: LibretroCore) -> LibretroEmulatorViewModel
+    @MainActor func makeLibretroEmulatorViewModel(rom: Rom, core: LibretroCore, source: GameLaunchSource?) -> LibretroEmulatorViewModel
 
     // Emulator Engine
     var enginePreference: PEmulatorEnginePreference { get }
@@ -122,6 +126,7 @@ protocol PDependencyFactory {
 
     // Local ROM ViewModels
     @MainActor func makeSyncSaveViewModel(rom: DownloadedROM) -> SyncSaveViewModel
+    @MainActor func makeGameDataViewModel(romID: Int, fileName: String) -> SyncSaveViewModel
     @MainActor func makeShareROMViewModel(rom: DownloadedROM) -> ShareROMViewModel
 }
 
@@ -161,6 +166,7 @@ class DefaultDependencyFactory: PDependencyFactory {
     }()
     lazy var apiClient: PRommAPIClient = RommAPIClient.shared
     lazy var tokenProvider: PTokenProvider = TokenProvider()
+    lazy var gameLaunchSourcePreference: PGameLaunchSourcePreference = UserDefaultsGameLaunchSourcePreferenceStore()
 
     private init() {}
     
@@ -389,7 +395,8 @@ class DefaultDependencyFactory: PDependencyFactory {
             tokenProvider: tokenProvider,
             checkEmulatorSupport: makeCheckEmulatorSupportUseCase(),
             enginePreference: enginePreference,
-            platformSupport: makePlatformEngineSupport()
+            platformSupport: makePlatformEngineSupport(),
+            launchSourcePreference: gameLaunchSourcePreference
         )
     }
 
@@ -464,6 +471,18 @@ class DefaultDependencyFactory: PDependencyFactory {
         UpdateStateUseCase(repository: statesRepository)
     }
 
+    func makeDeleteSavesUseCase() -> PDeleteSavesUseCase {
+        DeleteSavesUseCase(repository: savesRepository)
+    }
+
+    func makeDeleteStatesUseCase() -> PDeleteStatesUseCase {
+        DeleteStatesUseCase(repository: statesRepository)
+    }
+
+    func makeDownloadAssetUseCase() -> PDownloadAssetUseCase {
+        DownloadAssetUseCase(apiClient: apiClient)
+    }
+
     // MARK: - Local ROM Use Cases
 
     func makeGetROMShareFilesUseCase() -> PGetROMShareFilesUseCase {
@@ -473,8 +492,13 @@ class DefaultDependencyFactory: PDependencyFactory {
     // MARK: - Local ROM ViewModels
 
     @MainActor func makeSyncSaveViewModel(rom: DownloadedROM) -> SyncSaveViewModel {
+        makeGameDataViewModel(romID: rom.id, fileName: rom.files.first?.fileName ?? rom.name)
+    }
+
+    @MainActor func makeGameDataViewModel(romID: Int, fileName: String) -> SyncSaveViewModel {
         SyncSaveViewModel(
-            rom: rom,
+            romID: romID,
+            fileName: fileName,
             listSavesUseCase: makeListServerSavesUseCase(),
             listStatesUseCase: makeListServerStatesUseCase(),
             downloadSaveUseCase: makeDownloadSaveUseCase(),
@@ -483,7 +507,11 @@ class DefaultDependencyFactory: PDependencyFactory {
             updateSaveUseCase: makeUpdateSaveUseCase(),
             uploadStateUseCase: makeUploadStateUseCase(),
             updateStateUseCase: makeUpdateStateUseCase(),
-            saveStore: saveStore
+            deleteSavesUseCase: makeDeleteSavesUseCase(),
+            deleteStatesUseCase: makeDeleteStatesUseCase(),
+            downloadAssetUseCase: makeDownloadAssetUseCase(),
+            saveStore: saveStore,
+            selectionPreference: gameLaunchSourcePreference
         )
     }
 
@@ -491,10 +519,11 @@ class DefaultDependencyFactory: PDependencyFactory {
         ShareROMViewModel(rom: rom, getShareFilesUseCase: makeGetROMShareFilesUseCase())
     }
 
-    @MainActor func makeLibretroEmulatorViewModel(rom: Rom, core: LibretroCore) -> LibretroEmulatorViewModel {
+    @MainActor func makeLibretroEmulatorViewModel(rom: Rom, core: LibretroCore, source: GameLaunchSource?) -> LibretroEmulatorViewModel {
         LibretroEmulatorViewModel(
             rom: rom,
             core: core,
+            launchSource: source,
             getDownloadedROM: makeGetDownloadedROMUseCase(),
             resolveROMFile: makeResolveROMFileUseCase(),
             saveStates: makeEmulatorSaveStatesUseCase(),

@@ -20,15 +20,23 @@ class EmulatorViewModel {
 
     // Dependencies
     private let rom: Rom
+    private let launchSource: GameLaunchSource?
     private let tokenProvider: PTokenProvider
+    private let serverVersionProvider: () -> String?
     private let logger = Logger.viewModel
 
     init(
         rom: Rom,
-        tokenProvider: PTokenProvider = TokenProvider()
+        launchSource: GameLaunchSource?,
+        tokenProvider: PTokenProvider = TokenProvider(),
+        serverVersionProvider: @escaping () -> String? = {
+            UserDefaults.standard.string(forKey: "heartbeat.lastKnownServerVersion")
+        }
     ) {
         self.rom = rom
+        self.launchSource = launchSource
         self.tokenProvider = tokenProvider
+        self.serverVersionProvider = serverVersionProvider
     }
 
     func startEmulator() {
@@ -44,11 +52,17 @@ class EmulatorViewModel {
         }
         logger.info("✅ Server URL: \(serverURLString)")
 
-        // Build ROMM's EmulatorJS player URL
-        let cleanServerURL = serverURLString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: "\(cleanServerURL)/rom/\(rom.id)/ejs") else {
-            logger.error("❌ Failed to create emulator URL")
-            errorMessage = "Failed to create emulator URL"
+        let url: URL
+        do {
+            url = try RomMWebLaunchURLAdapter.makeURL(
+                serverURL: serverURLString,
+                romID: rom.id,
+                source: launchSource,
+                serverVersion: serverVersionProvider()
+            )
+        } catch {
+            logger.error("❌ Failed to create emulator URL: \(error)")
+            errorMessage = error.localizedDescription
             isLoading = false
             return
         }
@@ -56,6 +70,61 @@ class EmulatorViewModel {
         emulatorURL = url
         logger.info("✅ Emulator URL: \(url.absoluteString)")
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    }
+
+    enum RomMWebLaunchURLAdapter {
+        enum AdapterError: LocalizedError {
+            case selectedSourceIsLocalOnly
+            case unsupportedServerVersion(String?)
+            case invalidServerURL
+
+            var errorDescription: String? {
+                switch self {
+                case .selectedSourceIsLocalOnly:
+                    return "This save is only on this device. Upload it before using it with RomM Web."
+                case .unsupportedServerVersion(let version):
+                    return "Selected save and state launching in RomM Web requires RomM 5.0.0. Server version: \(version ?? "unknown")."
+                case .invalidServerURL:
+                    return "Failed to create emulator URL."
+                }
+            }
+        }
+
+        static func makeURL(
+            serverURL: String,
+            romID: Int,
+            source: GameLaunchSource?,
+            serverVersion: String?
+        ) throws -> URL {
+            let cleanServerURL = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard let source else {
+                guard let url = URL(string: "\(cleanServerURL)/rom/\(romID)/ejs") else {
+                    throw AdapterError.invalidServerURL
+                }
+                return url
+            }
+            guard let serverID = source.serverID else {
+                throw AdapterError.selectedSourceIsLocalOnly
+            }
+            // This legacy route is verified only for final RomM 5.0.0.
+            guard serverVersion == "5.0.0" else {
+                throw AdapterError.unsupportedServerVersion(serverVersion)
+            }
+
+            guard var components = URLComponents(string: "\(cleanServerURL)/console/rom/\(romID)/play") else {
+                throw AdapterError.invalidServerURL
+            }
+            switch source {
+            case .save:
+                components.queryItems = [URLQueryItem(name: "save", value: String(serverID))]
+            case .state:
+                components.queryItems = [URLQueryItem(name: "state", value: String(serverID))]
+            }
+            guard let url = components.url else {
+                throw AdapterError.invalidServerURL
+            }
+            return url
+        }
     }
 
 

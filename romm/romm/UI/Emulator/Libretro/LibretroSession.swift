@@ -10,6 +10,7 @@ final class LibretroSession: NSObject {
     private let saveStates: PEmulatorSaveStatesUseCase
     private let aspectRatioPreference: PLibretroAspectRatioPreference
     private let cloudSync: CloudSaveSyncService?
+    private let launchSource: GameLaunchSource?
     private let frontend = LibretroFrontend.shared
 
     var onMenuRequested: (() -> Void)?
@@ -22,7 +23,8 @@ final class LibretroSession: NSObject {
         romId: Int,
         saveStates: PEmulatorSaveStatesUseCase,
         aspectRatioPreference: PLibretroAspectRatioPreference,
-        cloudSync: CloudSaveSyncService? = nil
+        cloudSync: CloudSaveSyncService? = nil,
+        launchSource: GameLaunchSource? = nil
     ) {
         self.gameURL = gameURL
         self.core = core
@@ -30,6 +32,7 @@ final class LibretroSession: NSObject {
         self.saveStates = saveStates
         self.aspectRatioPreference = aspectRatioPreference
         self.cloudSync = cloudSync
+        self.launchSource = launchSource
         self.viewController = LibretroGameViewController(
             core: core,
             gameURL: gameURL,
@@ -48,9 +51,15 @@ final class LibretroSession: NSObject {
         frontend.videoSink = videoView
 
         Task { [weak self] in
-            await self?.cloudSync?.pullBeforeLaunch()
-            self?.stageBatteryForCore()
-            self?.startCore()
+            guard let self else { return }
+            do {
+                try await cloudSync?.prepareForLaunch(source: launchSource)
+                stageBatteryForCore()
+                try startCore()
+            } catch {
+                print("[Libretro] selected launch failed: \(error.localizedDescription)")
+                viewController.showError(error.localizedDescription)
+            }
         }
     }
 
@@ -61,11 +70,14 @@ final class LibretroSession: NSObject {
     /// `LibretroSaves/<stem>.srm` — two different files, so the save never
     /// reaches the running game.
     private func stageBatteryForCore() {
-        guard let data = try? saveStates.readBattery(romId: romId) else { return }
         let dir = libretroSaveDirectory()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stem = gameURL.deletingPathExtension().lastPathComponent
         let dst = dir.appendingPathComponent("\(stem).srm")
+        guard let data = try? saveStates.readBattery(romId: romId) else {
+            try? FileManager.default.removeItem(at: dst)
+            return
+        }
         do {
             try data.write(to: dst, options: .atomic)
             print("[Libretro] staged battery into saveDir (\(data.count) bytes)")
@@ -74,23 +86,21 @@ final class LibretroSession: NSObject {
         }
     }
 
-    private func startCore() {
-        do {
-            let corePath = try locateCoreDylib()
-            let systemDir = libretroSystemDirectory().path
-            let saveDir = libretroSaveDirectory().path
-            print("[Libretro] core=\(corePath)")
-            print("[Libretro] system=\(systemDir) save=\(saveDir)")
-            try frontend.load(
-                corePath: corePath,
-                gamePath: gameURL.path,
-                systemDir: systemDir,
-                saveDir: saveDir
-            )
-            frontend.startRunLoop()
-        } catch {
-            print("[Libretro] start failed: \(error.localizedDescription)")
-            viewController.showError(error.localizedDescription)
+    private func startCore() throws {
+        let corePath = try locateCoreDylib()
+        let systemDir = libretroSystemDirectory().path
+        let saveDir = libretroSaveDirectory().path
+        print("[Libretro] core=\(corePath)")
+        print("[Libretro] system=\(systemDir) save=\(saveDir)")
+        try frontend.load(
+            corePath: corePath,
+            gamePath: gameURL.path,
+            systemDir: systemDir,
+            saveDir: saveDir
+        )
+        frontend.startRunLoop()
+        if case .state(_, let slot, _, _, _) = launchSource {
+            try loadState(slot: slot)
         }
     }
 

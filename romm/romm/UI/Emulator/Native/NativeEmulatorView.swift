@@ -7,9 +7,10 @@ struct NativeEmulatorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
-    init(rom: Rom, gameType: DeltaGameType, factory: PDependencyFactory = DefaultDependencyFactory.shared) {
+    init(rom: Rom, gameType: DeltaGameType, launchSource: GameLaunchSource?, factory: PDependencyFactory = DefaultDependencyFactory.shared) {
         self._viewModel = SwiftUI.State(wrappedValue: NativeEmulatorViewModel(
             rom: rom, gameType: gameType,
+            launchSource: launchSource,
             getDownloadedROM: factory.makeGetDownloadedROMUseCase(),
             resolveROMFile: factory.makeResolveROMFileUseCase(),
             saveStates: factory.makeEmulatorSaveStatesUseCase(),
